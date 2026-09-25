@@ -6,7 +6,7 @@ A desktop PDF viewer and (eventually) editor. Python + PySide6 + pdfium.
 
 ```bash
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+pip install -e ".[dev]"
 python -m pdfapp                # or: python -m pdfapp somefile.pdf
 ```
 
