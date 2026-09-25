@@ -30,12 +30,14 @@ pdfapp/
   writer.py      The only code that writes PDFs. pikepdf. write to temp -> commit (os.replace).
   rendering.py   pdfium bitmap -> QImage, plus an LRU page cache.
   pageview.py    Continuous scroll view, zoom, view rotation.
+  thumbnails.py  Page sidebar: multi-select, drag-to-reorder, lazy thumbnails.
+                 Emits requests only; MainWindow makes the PageList edit.
   mainwindow.py  Menus, toolbar, status bar, drag-and-drop.
 packaging/       PyInstaller spec, Inno Setup script, build script.
 ```
 
 Dependency direction is one-way: `transform` <- `pagelist` <- `document` <-
-`rendering` <- `pageview` <- `mainwindow`, with `writer` depending only on
+`rendering` <- `pageview`/`thumbnails` <- `mainwindow`, with `writer` depending only on
 `pagelist` and used only by `mainwindow`. Nothing lower imports anything higher.
 
 Page edits never mutate anything until save: pdfium keeps rendering the
@@ -94,12 +96,15 @@ window. Follow that pattern: isolate, display, don't hide.
 
 Built: open (incl. encrypted), continuous scroll, zoom to cursor, fit
 width/page, view rotation, navigation, form-field rendering, drag-and-drop,
-per-page error isolation. Page operations on one page at a time (rotate,
-delete, move earlier/later) with undo/redo, Save / Save As, and an
-unsaved-changes prompt.
+per-page error isolation. Page operations (rotate, delete, reorder) on
+the sidebar selection, with undo/redo, Save / Save As, and an unsaved-changes
+prompt. Thumbnail sidebar with multi-select and drag-to-reorder.
 
-Next, in order: thumbnail sidebar (multi-select, drag to reorder),
-merge/split, annotations, form filling, encryption, packaging.
+Next, in order: merge/split, annotations, form filling, encryption, packaging.
+
+Deployment target is shared multi-session desktops: no GPU, non-persistent
+profiles, pixels re-encoded over a remote-display protocol. Keep memory and repaints lean; don't
+count on per-user settings surviving logoff.
 
 ## Known limits (don't "fix" these without discussion)
 
@@ -113,6 +118,8 @@ merge/split, annotations, form filling, encryption, packaging.
 - Rendering is synchronous. Fine for text; a 600 DPI scan at 400% hitches.
   The planned fix is moving `PageRenderer` onto a `QThreadPool`; the interface
   is already shaped so that swap doesn't touch the widgets.
+- Thumbnails render lazily (visible rows only, ~30ms per tick) and cache
+  up to 200 by PageRef, so reorders and deletes never re-render.
 - One widget per page. Cheap to a few thousand pages, then it isn't. The fix
   is a virtualised canvas, deliberately deferred.
 - Fit-width uses the widest page in the document, not the current page, so the

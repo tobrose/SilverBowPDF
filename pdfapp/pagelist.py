@@ -100,6 +100,18 @@ class PageList:
         to = max(0, min(len(rest), to))
         return PageList(rest[:to] + moving + rest[to:])
 
+    def insert_position(self, indices: Sequence[int], before: int) -> int:
+        """Translate a drop point into `moved`'s `to`.
+
+        A drag reports "insert before row N" in the list as it currently is,
+        selected pages included. `moved` counts positions with the selected
+        pages already taken out, so every selected page above the drop point
+        shifts it up by one. Dropping a block onto itself is a no-op.
+        """
+        chosen = self._check(indices)
+        before = max(0, min(len(self._refs), before))
+        return before - sum(1 for i in chosen if i < before)
+
 
 T = TypeVar("T")
 

@@ -78,6 +78,21 @@ def test_pagelist_edits():
     assert r.rotated([0], -90).is_identity(5)
 
 
+def test_drop_position():
+    p = PageList.identity(6)
+
+    def drop(sel, before):
+        return [r.source for r in p.moved(sel, p.insert_position(sel, before))]
+
+    assert drop([0], 3) == [1, 2, 0, 3, 4, 5], "drag first page to before row 3"
+    assert drop([4], 1) == [0, 4, 1, 2, 3, 5], "drag upward"
+    assert drop([2], 6) == [0, 1, 3, 4, 5, 2], "drop past the end"
+    assert drop([1, 2], 2) == list(range(6)), "block dropped onto itself"
+    assert drop([1, 2], 3) == list(range(6)), "block dropped just below itself"
+    assert drop([1, 4], 0) == [1, 4, 0, 2, 3, 5], "scattered pages gather at the drop"
+    assert drop([1, 4], 6) == [0, 2, 3, 5, 1, 4]
+
+
 def test_pagelist_refuses_bad_edits():
     p = PageList.identity(3)
     for bad in (lambda: p.deleted([0, 1, 2]), lambda: p.deleted([]),

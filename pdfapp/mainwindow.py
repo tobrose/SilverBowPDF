@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QComboBox,
+    QDockWidget,
     QFileDialog,
     QInputDialog,
     QLabel,
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (
 from .document import DocumentError, PasswordRequired, PdfDocument
 from .pagelist import History, PageList
 from .pageview import FitMode, PdfView
+from .thumbnails import ThumbnailSidebar
 from .writer import EncryptionWouldBeLost, SaveError, commit, write_pdf
 
 APP_NAME = "PDF Workbench"
@@ -57,6 +59,17 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.view)
         self.view.setContextMenuPolicy(Qt.CustomContextMenu)
         self.view.customContextMenuRequested.connect(self._page_context_menu)
+
+        self.sidebar = ThumbnailSidebar(self)
+        self.sidebar_dock = QDockWidget("Pages", self)
+        self.sidebar_dock.setObjectName("pages_dock")
+        self.sidebar_dock.setWidget(self.sidebar)
+        self.sidebar_dock.setFeatures(QDockWidget.DockWidgetClosable)
+        self.addDockWidget(Qt.LeftDockWidgetArea, self.sidebar_dock)
+        self.sidebar.page_activated.connect(self.view.scroll_to_page)
+        self.sidebar.move_requested.connect(self._on_drop)
+        self.sidebar.delete_requested.connect(self.delete_pages)
+        self.sidebar.context_requested.connect(self._pages_menu)
 
         self._building_ui = True
         self._build_actions()
@@ -109,19 +122,21 @@ class MainWindow(QMainWindow):
         self.act_rotate_cw = QAction("Rotate View &Right", self, shortcut=QKeySequence("Ctrl+R"),
                                      triggered=lambda: self.view.rotate_view(90))
 
-        cur = lambda: self.view.current_page  # noqa: E731
-        self.act_page_rot_ccw = QAction("Rotate Page Left", self,
+        # These act on the pages selected in the sidebar -- see _targets().
+        sel = lambda: self._targets()  # noqa: E731
+        self.act_page_rot_ccw = QAction("Rotate Pages Left", self,
                                         shortcut=QKeySequence("Ctrl+Shift+L"),
-                                        triggered=lambda: self.rotate_page(cur(), -90))
-        self.act_page_rot_cw = QAction("Rotate Page Right", self,
+                                        triggered=lambda: self.rotate_pages(sel(), -90))
+        self.act_page_rot_cw = QAction("Rotate Pages Right", self,
                                        shortcut=QKeySequence("Ctrl+Shift+R"),
-                                       triggered=lambda: self.rotate_page(cur(), 90))
-        self.act_page_up = QAction("Move Page &Earlier", self, shortcut=QKeySequence("Alt+Up"),
-                                   triggered=lambda: self.move_page(cur(), -1))
-        self.act_page_down = QAction("Move Page &Later", self, shortcut=QKeySequence("Alt+Down"),
-                                     triggered=lambda: self.move_page(cur(), +1))
-        self.act_page_delete = QAction("&Delete Page", self, shortcut=QKeySequence("Ctrl+Shift+D"),
-                                       triggered=lambda: self.delete_page(cur()))
+                                       triggered=lambda: self.rotate_pages(sel(), 90))
+        self.act_page_up = QAction("Move Pages &Earlier", self, shortcut=QKeySequence("Alt+Up"),
+                                   triggered=lambda: self.move_pages_by(sel(), -1))
+        self.act_page_down = QAction("Move Pages &Later", self, shortcut=QKeySequence("Alt+Down"),
+                                     triggered=lambda: self.move_pages_by(sel(), +1))
+        self.act_page_delete = QAction("&Delete Pages", self,
+                                       shortcut=QKeySequence("Ctrl+Shift+D"),
+                                       triggered=lambda: self.delete_pages(sel()))
 
         self.act_next = QAction("Next Page", self, shortcut=QKeySequence("PgDown"),
                                 triggered=self.view.next_page)
@@ -196,6 +211,11 @@ class MainWindow(QMainWindow):
         view_menu.addSeparator()
         view_menu.addAction(self.act_rotate_ccw)
         view_menu.addAction(self.act_rotate_cw)
+        view_menu.addSeparator()
+        toggle = self.sidebar_dock.toggleViewAction()
+        toggle.setText("Page &Thumbnails")
+        toggle.setShortcut(QKeySequence("F4"))
+        view_menu.addAction(toggle)
 
         pages_menu = self.menuBar().addMenu("&Pages")
         pages_menu.addAction(self.act_page_rot_ccw)
@@ -280,36 +300,78 @@ class MainWindow(QMainWindow):
 
     # ---- page edits ----------------------------------------------------
 
-    def _edit(self, pages: PageList, label: str, current: int) -> None:
+    def _targets(self) -> list[int]:
+        """Pages an edit applies to: the sidebar selection, else the current page.
+
+        With the sidebar open the selection is visible, so the user can see
+        what a shortcut will hit. Without it, the current page is the only
+        sensible target.
+        """
+        if self.sidebar_dock.isVisible():
+            rows = self.sidebar.selected_rows()
+            if rows:
+                return rows
+        return [self.view.current_page]
+
+    @staticmethod
+    def _describe(indices: list[int]) -> str:
+        return f"Page {indices[0] + 1}" if len(indices) == 1 else f"{len(indices)} Pages"
+
+    def _edit(self, pages: PageList, label: str, current: int, select: list[int]) -> None:
         if self.history is None or pages == self.history.current:
             return
         self.history.push(pages, label)
-        self._show_pages(pages, current)
+        self._show_pages(pages, current, select)
 
-    def _show_pages(self, pages: PageList, current: int) -> None:
+    def _show_pages(self, pages: PageList, current: int,
+                    select: Optional[list[int]] = None) -> None:
         self.view.document.pages = pages
-        self.view.pages_changed(max(0, min(len(pages) - 1, current)))
+        current = max(0, min(len(pages) - 1, current))
+        self.sidebar.set_document(self.view.document)
+        self.view.pages_changed(current)
+        self.sidebar.select_rows(select if select else [current])
         self._refresh_page_count()
         self._refresh_edit_state()
 
-    def rotate_page(self, index: int, delta: int) -> None:
+    def rotate_pages(self, indices: list[int], delta: int) -> None:
+        if self.view.document is None or not indices:
+            return
         side = "Right" if delta > 0 else "Left"
-        self._edit(self.view.document.pages.rotated([index], delta),
-                   f"Rotate Page {index + 1} {side}", index)
+        self._edit(self.view.document.pages.rotated(indices, delta),
+                   f"Rotate {self._describe(indices)} {side}", indices[0], indices)
 
-    def delete_page(self, index: int) -> None:
+    def delete_pages(self, indices: list[int]) -> None:
+        if self.view.document is None or not indices:
+            return
         try:
-            pages = self.view.document.pages.deleted([index])
+            pages = self.view.document.pages.deleted(indices)
         except ValueError as exc:
-            QMessageBox.information(self, "Can't delete page", f"{str(exc).capitalize()}.")
+            QMessageBox.information(self, "Can't delete pages", f"{str(exc).capitalize()}.")
             return
-        self._edit(pages, f"Delete Page {index + 1}", index)
+        first = min(indices)
+        self._edit(pages, f"Delete {self._describe(indices)}", first,
+                   [min(first, len(pages) - 1)])
 
-    def move_page(self, index: int, step: int) -> None:
-        to = index + step
-        if not 0 <= to < self.view.document.page_count:
+    def move_pages_by(self, indices: list[int], step: int) -> None:
+        """Alt+Up / Alt+Down: shift the selection one place, as a block."""
+        doc = self.view.document
+        if doc is None or not indices:
             return
-        self._edit(self.view.document.pages.moved([index], to), f"Move Page {index + 1}", to)
+        to = min(indices) + step
+        if to < 0 or to + len(indices) > doc.page_count:
+            return
+        self._move(indices, to)
+
+    def _on_drop(self, indices: list[int], before: int) -> None:
+        doc = self.view.document
+        if doc is None or not indices:
+            return
+        self._move(indices, doc.pages.insert_position(indices, before))
+
+    def _move(self, indices: list[int], to: int) -> None:
+        pages = self.view.document.pages.moved(indices, to)
+        landed = list(range(to, to + len(indices)))
+        self._edit(pages, f"Move {self._describe(indices)}", to, landed)
 
     def undo(self) -> None:
         if self.history is not None and self.history.can_undo():
@@ -329,22 +391,31 @@ class MainWindow(QMainWindow):
         self.act_redo.setText(f"&Redo {h.redo_label()}" if h and h.can_redo() else "&Redo")
 
     def _page_context_menu(self, pos) -> None:
+        """Right-click in the page view: acts on exactly the page clicked."""
         if self.view.document is None:
             return
         index = self.view.page_at(pos)
-        if index is None:
+        if index is not None:
+            self._pages_menu([index], self.view.viewport().mapToGlobal(pos))
+
+    def _pages_menu(self, indices: list[int], global_pos) -> None:
+        doc = self.view.document
+        if doc is None or not indices:
             return
-        n = self.view.document.page_count
+        what = self._describe(indices)
+        n = doc.page_count
         menu = QMenu(self)
-        menu.addAction(f"Rotate Page {index + 1} Left", lambda: self.rotate_page(index, -90))
-        menu.addAction(f"Rotate Page {index + 1} Right", lambda: self.rotate_page(index, 90))
+        menu.addAction(f"Rotate {what} Left", lambda: self.rotate_pages(indices, -90))
+        menu.addAction(f"Rotate {what} Right", lambda: self.rotate_pages(indices, 90))
         menu.addSeparator()
-        menu.addAction("Move Earlier", lambda: self.move_page(index, -1)).setEnabled(index > 0)
-        menu.addAction("Move Later", lambda: self.move_page(index, +1)).setEnabled(index < n - 1)
+        menu.addAction("Move Earlier",
+                       lambda: self.move_pages_by(indices, -1)).setEnabled(min(indices) > 0)
+        menu.addAction("Move Later", lambda: self.move_pages_by(indices, +1)).setEnabled(
+            min(indices) + len(indices) < n)
         menu.addSeparator()
-        menu.addAction(f"Delete Page {index + 1}",
-                       lambda: self.delete_page(index)).setEnabled(n > 1)
-        menu.exec(self.view.viewport().mapToGlobal(pos))
+        menu.addAction(f"Delete {what}",
+                       lambda: self.delete_pages(indices)).setEnabled(len(indices) < n)
+        menu.exec(global_pos)
 
     # ---- saving --------------------------------------------------------
 
@@ -451,6 +522,7 @@ class MainWindow(QMainWindow):
     # ---- signal handlers -----------------------------------------------
 
     def _on_document_opened(self, document: Optional[PdfDocument]) -> None:
+        self.sidebar.set_document(document)
         if document is None:
             self.history = None
             self.setWindowTitle(APP_NAME)
@@ -481,6 +553,7 @@ class MainWindow(QMainWindow):
         self.page_total.setText(f" of {doc.page_count} ")
 
     def _on_page_changed(self, index: int) -> None:
+        self.sidebar.follow_page(index)
         self.page_spin.blockSignals(True)
         self.page_spin.setValue(index + 1)
         self.page_spin.blockSignals(False)

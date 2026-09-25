@@ -30,9 +30,11 @@ on a headless box.
 | `Ctrl++` `Ctrl+-` `Ctrl+0` | Zoom in / out / 100% |
 | `Ctrl+1` `Ctrl+2` | Fit width / fit page |
 | `Ctrl+L` `Ctrl+R` | Rotate view left / right (display only) |
-| `Ctrl+Shift+L` `Ctrl+Shift+R` | Rotate page left / right (saved) |
-| `Alt+Up` `Alt+Down` | Move page earlier / later |
-| `Ctrl+Shift+D` | Delete page |
+| `F4` | Show / hide page thumbnails |
+| `Ctrl+Shift+L` `Ctrl+Shift+R` | Rotate selected pages left / right (saved) |
+| `Alt+Up` `Alt+Down` | Move selected pages earlier / later |
+| `Ctrl+Shift+D`, or `Delete` in the sidebar | Delete selected pages |
+| Drag thumbnails | Reorder pages (Ctrl/Shift+click to select several) |
 | `Ctrl+Z` `Ctrl+Y` | Undo / redo |
 | `Ctrl+S` `Ctrl+Shift+S` | Save / save as |
 | Right-click a page | Page operations for that page |
@@ -51,6 +53,7 @@ pdfapp/
   writer.py      Saves edits with pikepdf: temp file, verify, atomic replace.
   rendering.py   pdfium bitmap -> QImage, plus an LRU page cache.
   pageview.py    Continuous scrolling view, zoom, view rotation.
+  thumbnails.py  Page sidebar: select, drag to reorder, lazy thumbnails.
   mainwindow.py  Menus, toolbar, status bar, drag-and-drop.
 tests/
   test_transform.py
@@ -70,9 +73,10 @@ putting a highlight two inches from where the user clicked.
 Working: open (including encrypted, with a password prompt), continuous scroll,
 zoom to cursor, fit width/page, view rotation, page navigation, form-field
 rendering, drag-and-drop, per-page error isolation, page operations
-(rotate/delete/reorder) with undo and save.
+(rotate/delete/reorder) with undo and save, thumbnail sidebar with
+multi-select and drag to reorder.
 
-Not built yet, in intended order: thumbnail sidebar, merge/split, annotations, form filling, encryption,
+Not built yet, in intended order: merge/split, annotations, form filling, encryption,
 packaging.
 
 ## Known limits
