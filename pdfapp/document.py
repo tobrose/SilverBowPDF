@@ -7,7 +7,8 @@ from typing import Optional, Tuple
 
 import pypdfium2 as pdfium
 
-from .transform import PageTransform
+from .pagelist import PageList
+from .transform import PageTransform, normalize_rotation
 
 
 class PasswordRequired(Exception):
@@ -21,13 +22,16 @@ class DocumentError(Exception):
 class PdfDocument:
     """Read-only view of a PDF for rendering and measurement.
 
-    Page mutation lives elsewhere (pikepdf, once page operations land). This
-    class exists purely to answer "how big is page N and what does it look
-    like at scale S".
+    This class exists purely to answer "how big is page N and what does it
+    look like at scale S". Page operations don't mutate anything: `pages` maps
+    each displayed index to a source page plus extra rotation, and every
+    public method here takes a *displayed* index. Writing the edits out is
+    writer.py's job, via pikepdf.
     """
 
     def __init__(self, path: str | Path, password: Optional[str] = None):
         self.path = Path(path)
+        self.password = password
         try:
             self._pdf = pdfium.PdfDocument(str(self.path), password=password)
             # Touch the page count so a bad password fails here, not later.
@@ -48,7 +52,9 @@ class PdfDocument:
         except Exception:
             self._has_forms = False
 
-        self._page_cache: dict[int, pdfium.PdfPage] = {}
+        self._page_cache: dict[int, pdfium.PdfPage] = {}  # keyed by SOURCE index
+        self._source_count = len(self._pdf)
+        self._pages = PageList.identity(self._source_count)
         self._closed = False
 
     # ---- lifecycle -----------------------------------------------------
@@ -73,7 +79,24 @@ class PdfDocument:
 
     @property
     def page_count(self) -> int:
-        return len(self._pdf)
+        return len(self._pages)
+
+    @property
+    def source_page_count(self) -> int:
+        return self._source_count
+
+    @property
+    def pages(self) -> PageList:
+        return self._pages
+
+    @pages.setter
+    def pages(self, pages: PageList) -> None:
+        if len(pages) == 0:
+            raise ValueError("a document needs at least one page")
+        for ref in pages:
+            if not 0 <= ref.source < self._source_count:
+                raise IndexError(f"source page {ref.source} not in this file")
+        self._pages = pages
 
     @property
     def has_forms(self) -> bool:
@@ -90,10 +113,11 @@ class PdfDocument:
     def _page(self, index: int) -> pdfium.PdfPage:
         if not 0 <= index < self.page_count:
             raise IndexError(f"page {index} out of range (0..{self.page_count - 1})")
-        page = self._page_cache.get(index)
+        source = self._pages[index].source
+        page = self._page_cache.get(source)
         if page is None:
-            page = self._pdf[index]
-            self._page_cache[index] = page
+            page = self._pdf[source]
+            self._page_cache[source] = page
         return page
 
     def page_box(self, index: int) -> Tuple[float, float, float, float]:
@@ -108,11 +132,17 @@ class PdfDocument:
         return box  # type: ignore[return-value]
 
     def page_rotation(self, index: int) -> int:
-        """The page's own /Rotate, in degrees clockwise."""
+        """The page's own /Rotate plus any edit rotation, degrees clockwise.
+
+        This is the rotation the page will have once saved, so the transform
+        built from it matches what pdfium renders now and what the file will
+        contain later.
+        """
         try:
-            return int(self._page(index).get_rotation())
+            intrinsic = int(self._page(index).get_rotation())
         except Exception:
-            return 0
+            intrinsic = 0
+        return normalize_rotation(intrinsic + self._pages[index].rotation)
 
     def transform(
         self,
@@ -157,9 +187,11 @@ class PdfDocument:
         unless you have a reason not to.
         """
         page = self._page(index)
+        # pdfium applies the intrinsic /Rotate itself; we add the edit
+        # rotation on top, exactly as saving it into /Rotate would.
         return page.render(
             scale=scale,
-            rotation=view_rotation % 360,
+            rotation=(self._pages[index].rotation + view_rotation) % 360,
             may_draw_forms=self._has_forms,
             prefer_bgrx=True,  # 32-bit aligned rows blit faster into Qt
         )

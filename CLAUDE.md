@@ -15,6 +15,7 @@ pip install -e ".[dev]"
 python -m pdfapp                  # run
 python -m pdfapp file.pdf         # run with a file
 python tests/test_transform.py    # tests, no pytest needed
+python tests/test_pages.py
 pytest                            # tests, if pytest is installed
 ```
 
@@ -23,15 +24,23 @@ pytest                            # tests, if pytest is installed
 ```
 pdfapp/
   transform.py   PageTransform. All coordinate math. LOAD-BEARING.
+  pagelist.py    PageList (page edits as data) + History (snapshot undo). No Qt/pdfium/pikepdf.
   document.py    pypdfium2 wrapper. NO Qt imports -- must stay headless-testable.
+                 Takes *displayed* indices; maps them through its PageList to source pages.
+  writer.py      The only code that writes PDFs. pikepdf. write to temp -> commit (os.replace).
   rendering.py   pdfium bitmap -> QImage, plus an LRU page cache.
   pageview.py    Continuous scroll view, zoom, view rotation.
   mainwindow.py  Menus, toolbar, status bar, drag-and-drop.
 packaging/       PyInstaller spec, Inno Setup script, build script.
 ```
 
-Dependency direction is one-way: `transform` <- `document` <- `rendering` <-
-`pageview` <- `mainwindow`. Nothing lower imports anything higher.
+Dependency direction is one-way: `transform` <- `pagelist` <- `document` <-
+`rendering` <- `pageview` <- `mainwindow`, with `writer` depending only on
+`pagelist` and used only by `mainwindow`. Nothing lower imports anything higher.
+
+Page edits never mutate anything until save: pdfium keeps rendering the
+original file through the PageList. `tests/test_pages.py` asserts the preview
+and the saved file are pixel-identical -- keep that test passing.
 
 ## Hard rules
 
@@ -61,7 +70,12 @@ dev machine.
 `PageTransform`'s prediction.** That check is deliberate. Do not soften it to a
 warning or a resize.
 
-**5. Never silently swallow a pdfium exception.** `PageWidget.paintEvent` draws
+**5. Never silently drop encryption.** pikepdf's default save strips it
+(verified, pikepdf 10). `write_pdf` raises `EncryptionWouldBeLost` unless the
+caller passes `allow_decrypt=True` after the user explicitly agreed, and the
+protected original is never overwritten with an unprotected file.
+
+**6. Never silently swallow a pdfium exception.** `PageWidget.paintEvent` draws
 the error onto the failed page so one corrupt page does not take down the
 window. Follow that pattern: isolate, display, don't hide.
 
@@ -80,15 +94,21 @@ window. Follow that pattern: isolate, display, don't hide.
 
 Built: open (incl. encrypted), continuous scroll, zoom to cursor, fit
 width/page, view rotation, navigation, form-field rendering, drag-and-drop,
-per-page error isolation.
+per-page error isolation. Page operations on one page at a time (rotate,
+delete, move earlier/later) with undo/redo, Save / Save As, and an
+unsaved-changes prompt.
 
-Next, in order: page operations (rotate/delete/reorder, saved via pikepdf),
+Next, in order: thumbnail sidebar (multi-select, drag to reorder),
 merge/split, annotations, form filling, encryption, packaging.
 
-The command/undo stack lands with page operations, not before -- a viewer has
-nothing to undo.
-
 ## Known limits (don't "fix" these without discussion)
+
+- Save resets undo history. The saved file becomes the new source, and old
+  PageList snapshots index into the previous file.
+- Deleting pages leaves their form fields in /AcroForm and outline entries
+  pointing at nothing. Viewers tolerate it; clean up when merge/split lands.
+- Encrypted files: Save is refused, Save As writes an unprotected copy after
+  an explicit warning. Real re-encryption is the encryption milestone.
 
 - Rendering is synchronous. Fine for text; a 600 DPI scan at 400% hitches.
   The planned fix is moving `PageRenderer` onto a `QThreadPool`; the interface

@@ -14,6 +14,7 @@ python -m pdfapp                # or: python -m pdfapp somefile.pdf
 
 ```bash
 python tests/test_transform.py   # no pytest needed
+python tests/test_pages.py
 # or
 pytest tests/
 ```
@@ -28,7 +29,13 @@ on a headless box.
 | `Ctrl+O` / `Ctrl+W` | Open / close |
 | `Ctrl++` `Ctrl+-` `Ctrl+0` | Zoom in / out / 100% |
 | `Ctrl+1` `Ctrl+2` | Fit width / fit page |
-| `Ctrl+L` `Ctrl+R` | Rotate view left / right |
+| `Ctrl+L` `Ctrl+R` | Rotate view left / right (display only) |
+| `Ctrl+Shift+L` `Ctrl+Shift+R` | Rotate page left / right (saved) |
+| `Alt+Up` `Alt+Down` | Move page earlier / later |
+| `Ctrl+Shift+D` | Delete page |
+| `Ctrl+Z` `Ctrl+Y` | Undo / redo |
+| `Ctrl+S` `Ctrl+Shift+S` | Save / save as |
+| Right-click a page | Page operations for that page |
 | `PgUp` `PgDn` `Ctrl+Home` `Ctrl+End` `Ctrl+G` | Navigation |
 | `Ctrl` + scroll | Zoom at cursor |
 
@@ -39,12 +46,15 @@ Drag a PDF onto the window to open it.
 ```
 pdfapp/
   transform.py   PageTransform -- all coordinate math. Start here.
+  pagelist.py    Page edits as data, plus snapshot undo.
   document.py    pypdfium2 wrapper. No Qt imports, testable headless.
+  writer.py      Saves edits with pikepdf: temp file, verify, atomic replace.
   rendering.py   pdfium bitmap -> QImage, plus an LRU page cache.
   pageview.py    Continuous scrolling view, zoom, view rotation.
   mainwindow.py  Menus, toolbar, status bar, drag-and-drop.
 tests/
   test_transform.py
+  test_pages.py
 ```
 
 `transform.py` is the load-bearing file. Three coordinate systems (PDF user
@@ -59,10 +69,10 @@ putting a highlight two inches from where the user clicked.
 
 Working: open (including encrypted, with a password prompt), continuous scroll,
 zoom to cursor, fit width/page, view rotation, page navigation, form-field
-rendering, drag-and-drop, per-page error isolation.
+rendering, drag-and-drop, per-page error isolation, page operations
+(rotate/delete/reorder) with undo and save.
 
-Not built yet, in intended order: page operations (rotate/delete/reorder,
-saved via pikepdf), merge/split, annotations, form filling, encryption,
+Not built yet, in intended order: thumbnail sidebar, merge/split, annotations, form filling, encryption,
 packaging.
 
 ## Known limits

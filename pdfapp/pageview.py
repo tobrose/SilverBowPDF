@@ -154,19 +154,47 @@ class PdfView(QScrollArea):
 
     # ---- document ------------------------------------------------------
 
-    def set_document(self, document: Optional[PdfDocument]) -> None:
+    def set_document(self, document: Optional[PdfDocument], keep_view: bool = False) -> None:
+        """Show `document`, closing the previous one.
+
+        keep_view keeps zoom, view rotation and page position -- for reopening
+        the same file after a save, which shouldn't feel like opening it.
+        """
         if self.document is not None:
             self.document.close()
         self.document = document
         self.renderer = PageRenderer(document) if document is not None else None
-        self._rotation = 0
+        target = self._current_page if keep_view else 0
+        if not keep_view:
+            self._rotation = 0
         self._current_page = 0
         self._rebuild()
         self.document_opened.emit(document)
         if document is not None:
             self._apply_fit()
-            self.verticalScrollBar().setValue(0)
-            self.page_changed.emit(0)
+            self._layout.activate()
+            self.scroll_to_page(target)
+
+    def pages_changed(self, current: int) -> None:
+        """The document's page list was edited. Rebuild, keeping zoom and view."""
+        if self.document is None:
+            return
+        if self.renderer is not None:
+            self.renderer.clear()  # cache is keyed by displayed index, now stale
+        self._rebuild()
+        self._apply_fit()  # the widest page may have been deleted or rotated
+        # New widgets have no position until the layout runs; scrolling to one
+        # before that lands on y=0.
+        self._layout.activate()
+        self.scroll_to_page(current)
+
+    def page_at(self, viewport_pos: QPoint) -> Optional[int]:
+        """Index of the page under a viewport position, or None for the gap."""
+        pos = self._container.mapFrom(self.viewport(), viewport_pos)
+        for page in self._pages:
+            if page.geometry().contains(pos):
+                return page.index
+        return None
 
     def _rebuild(self) -> None:
         while self._layout.count():
