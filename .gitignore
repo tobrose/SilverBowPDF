@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+
+# Build / packaging output
+build/
+dist/
+*.spec.bak
+packaging/out/
+packaging/Output/
+
+# Test / tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editors & OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Local scratch -- never commit sample PDFs, they may contain personal data
+scratch/
+samples/
+*.local.pdf
