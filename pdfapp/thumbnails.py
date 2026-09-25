@@ -232,6 +232,13 @@ class ThumbnailSidebar(QListWidget):
         super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event) -> None:
+        # Holding a page and scrolling means carrying it somewhere. Without
+        # this, the base view is still drag-selecting from the press and
+        # selects every page scrolled past -- a surprise, and one Delete away
+        # from losing a lot of pages.
+        if (self._drag_rows is None and self._press_row >= 0
+                and self._press_pos is not None and event.buttons() & Qt.LeftButton):
+            self._start_drag(self._press_pos)
         super().wheelEvent(event)
         if self._drag_rows is not None:
             self._update_drop()  # content moved under a still cursor
