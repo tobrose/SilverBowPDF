@@ -2,14 +2,26 @@
 
 from __future__ import annotations
 
+import ctypes
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import pypdfium2 as pdfium
+import pypdfium2.raw as pdfium_c
 
+from .annots import Annot, AnnotEdits, PageKey, is_editable
 from .pagelist import PageList, PageRef
 from .transform import PageTransform, normalize_rotation
+
+_ANNOT_KINDS = {
+    getattr(pdfium_c, f"FPDF_ANNOT_{name.upper()}"): name
+    for name in ("Text", "Link", "FreeText", "Line", "Square", "Circle", "Polygon",
+                 "PolyLine", "Highlight", "Underline", "Squiggly", "StrikeOut", "Stamp",
+                 "Caret", "Ink", "Popup", "FileAttachment", "Sound", "Movie", "Widget",
+                 "Screen", "PrinterMark", "TrapNet", "Watermark", "RichMedia",
+                 "XFAWidget", "Redact")
+}
 
 
 class PasswordRequired(Exception):
@@ -74,6 +86,8 @@ class PdfDocument:
     def __init__(self, path: str | Path, password: Optional[str] = None):
         self._sources: List[_Source] = [_open_source(Path(path), password)]
         self._pages = PageList.identity(self._sources[0].page_count)
+        self._annots = AnnotEdits()
+        self._file_annots: Dict[PageKey, Tuple[Annot, ...]] = {}
         self._closed = False
 
     # ---- lifecycle -----------------------------------------------------
@@ -150,6 +164,68 @@ class PdfDocument:
             if not 0 <= ref.source < self._sources[ref.file].page_count:
                 raise IndexError(f"page {ref.source} not in {self._sources[ref.file].info.path.name}")
         self._pages = pages
+
+    # ---- annotations ---------------------------------------------------
+
+    @property
+    def annots(self) -> AnnotEdits:
+        return self._annots
+
+    @annots.setter
+    def annots(self, annots: AnnotEdits) -> None:
+        self._annots = annots
+
+    def page_key(self, index: int) -> PageKey:
+        ref = self._pages[index]
+        return (ref.file, ref.source)
+
+    def page_annots(self, index: int) -> Tuple[Annot, ...]:
+        """The page's editable annotations as currently edited."""
+        edited = self._annots.get(self.page_key(index))
+        return edited if edited is not None else self.file_annots(index)
+
+    def file_annots(self, index: int) -> Tuple[Annot, ...]:
+        """The page's editable annotations as they are in the file.
+
+        Read through pdfium's annotation API. FPDFPage_GetAnnot indexes the
+        page's /Annots array directly, which is what makes `origin` line up
+        with the index the writer sees through pikepdf.
+        """
+        key = self.page_key(index)
+        cached = self._file_annots.get(key)
+        if cached is not None:
+            return cached
+        page = self._page(index)
+        found: List[Annot] = []
+        for i in range(pdfium_c.FPDFPage_GetAnnotCount(page)):
+            handle = pdfium_c.FPDFPage_GetAnnot(page, i)
+            if not handle:
+                continue
+            try:
+                kind = _ANNOT_KINDS.get(pdfium_c.FPDFAnnot_GetSubtype(handle), "Unknown")
+                if not is_editable(kind, pdfium_c.FPDFAnnot_GetFlags(handle)):
+                    continue
+                rect = pdfium_c.FS_RECTF()
+                if not pdfium_c.FPDFAnnot_GetRect(handle, rect):
+                    continue
+                found.append(Annot(
+                    kind, (rect.left, rect.bottom, rect.right, rect.top),
+                    contents=_annot_string(handle, b"Contents"),
+                    author=_annot_string(handle, b"T"),
+                    origin=i,
+                    reply_to=_reply_target(page, handle),
+                ))
+            finally:
+                pdfium_c.FPDFPage_CloseAnnot(handle)
+        result = tuple(found)
+        self._file_annots[key] = result
+        return result
+
+    def page_geometry(self, index: int):
+        """(MediaBox, CropBox, intrinsic /Rotate) with inheritance resolved."""
+        page = self._page(index)
+        media = tuple(float(v) for v in page.get_mediabox())
+        return media, self.page_box(index), int(page.get_rotation())
 
     @property
     def has_forms(self) -> bool:
@@ -237,18 +313,70 @@ class PdfDocument:
 
     # ---- rendering ------------------------------------------------------
 
-    def render_bitmap(self, index: int, scale: float, view_rotation: int = 0):
+    def render_bitmap(self, index: int, scale: float, view_rotation: int = 0,
+                      overlay: Optional[bytes] = None):
         """Render a page and return the raw pdfium bitmap.
 
         Caller owns the bitmap and must close it. Use PageRenderer instead
         unless you have a reason not to.
+
+        overlay: a one-page PDF of this page's annotations with edits applied
+        (annotpdf.overlay_pdf). The page is then drawn in the same three
+        passes pdfium's normal render makes -- content, annotations, form
+        fields -- except the annotations come from the overlay. Same boxes,
+        same rotation, same bitmap: the result is what the saved page renders.
         """
         page = self._page(index)
+        source = self._source(index)
         # pdfium applies the intrinsic /Rotate itself; we add the edit
         # rotation on top, exactly as saving it into /Rotate would.
-        return page.render(
-            scale=scale,
-            rotation=(self._pages[index].rotation + view_rotation) % 360,
-            may_draw_forms=self._source(index).has_forms,
-            prefer_bgrx=True,  # 32-bit aligned rows blit faster into Qt
-        )
+        rotation = (self._pages[index].rotation + view_rotation) % 360
+        if overlay is None:
+            return page.render(
+                scale=scale,
+                rotation=rotation,
+                may_draw_forms=source.has_forms,
+                prefer_bgrx=True,  # 32-bit aligned rows blit faster into Qt
+            )
+
+        bitmap = page.render(scale=scale, rotation=rotation, draw_annots=False,
+                             may_draw_forms=False, prefer_bgrx=True)
+        # Exactly the placement page.render used (no crop): origin, full
+        # size, rotation as a quarter-turn count.
+        placement = (0, 0, bitmap.width, bitmap.height, rotation // 90)
+        overlay_doc = pdfium.PdfDocument(overlay)
+        try:
+            overlay_page = overlay_doc[0]
+            try:
+                pdfium_c.FPDF_RenderPageBitmap(bitmap, overlay_page, *placement,
+                                               pdfium_c.FPDF_ANNOT)
+            finally:
+                overlay_page.close()
+        finally:
+            overlay_doc.close()
+        formenv = getattr(page, "formenv", None)
+        if source.has_forms and formenv:
+            pdfium_c.FPDF_FFLDraw(formenv, bitmap, page, *placement, pdfium_c.FPDF_ANNOT)
+        return bitmap
+
+
+def _reply_target(page, handle) -> Optional[int]:
+    """/Annots index of the annotation this one replies to (/IRT), if any."""
+    linked = pdfium_c.FPDFAnnot_GetLinkedAnnot(handle, b"IRT")
+    if not linked:
+        return None
+    try:
+        index = pdfium_c.FPDFPage_GetAnnotIndex(page, linked)
+        return index if index >= 0 else None
+    finally:
+        pdfium_c.FPDFPage_CloseAnnot(linked)
+
+
+def _annot_string(handle, key: bytes) -> str:
+    """A text value of an annotation (UTF-16LE from pdfium), or ''."""
+    size = pdfium_c.FPDFAnnot_GetStringValue(handle, key, None, 0)
+    if size <= 2:
+        return ""
+    buffer = ctypes.create_string_buffer(size)
+    pdfium_c.FPDFAnnot_GetStringValue(handle, key, ctypes.cast(buffer, ctypes.POINTER(pdfium_c.FPDF_WCHAR)), size)
+    return buffer.raw[:size - 2].decode("utf-16-le", errors="replace")

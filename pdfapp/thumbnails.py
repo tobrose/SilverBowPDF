@@ -59,7 +59,7 @@ class ThumbnailSidebar(QListWidget):
         super().__init__(parent)
         self.document: Optional[PdfDocument] = None
         self._renderer: Optional[PageRenderer] = None
-        self._cache: "OrderedDict[Tuple[PageRef, int], QPixmap]" = OrderedDict()
+        self._cache: "OrderedDict[tuple, QPixmap]" = OrderedDict()
         self._errors: dict[PageRef, str] = {}
 
         self.setViewMode(QListWidget.ListMode)
@@ -402,8 +402,12 @@ class ThumbnailSidebar(QListWidget):
         if self.document is not None and self.isVisible():
             self._timer.start()
 
-    def _key(self, index: int) -> Tuple[PageRef, int]:
-        return (self.document.pages[index], int(round(self.devicePixelRatioF() * 100)))
+    def _key(self, index: int) -> tuple:
+        # The page's annotation edits are in the key, so annotating a page
+        # re-renders its thumbnail and undo gets the old one back from cache.
+        doc = self.document
+        return (doc.pages[index], doc.annots.get(doc.page_key(index)),
+                int(round(self.devicePixelRatioF() * 100)))
 
     def _cached(self, index: int) -> Optional[QPixmap]:
         pixmap = self._cache.get(self._key(index))

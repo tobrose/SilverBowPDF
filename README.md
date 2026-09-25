@@ -40,6 +40,9 @@ on a headless box.
 | `Ctrl+Z` `Ctrl+Y` | Undo / redo |
 | `Ctrl+S` `Ctrl+Shift+S` | Save / save as |
 | Right-click a page | Page operations for that page |
+| `V` / `N` / `Esc` | Select tool / Note tool / back to Select |
+| Click, drag, `Delete` | Select, move, delete an annotation |
+| Double-click an annotation | Edit its comment |
 | `PgUp` `PgDn` `Ctrl+Home` `Ctrl+End` `Ctrl+G` | Navigation |
 | `Ctrl` + scroll | Zoom at cursor |
 

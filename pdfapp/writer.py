@@ -25,6 +25,8 @@ from typing import Collection, Dict, List, Optional, Protocol, Sequence, Tuple
 
 import pikepdf
 
+from .annotpdf import apply_edits
+from .annots import AnnotEdits
 from .pagelist import PageList
 
 
@@ -61,6 +63,7 @@ def write_pdf(
     pages: PageList,
     dest: str | Path,
     allow_decrypt: Collection[int] = (),
+    annots: AnnotEdits = AnnotEdits(),
 ) -> Path:
     """Build the edited PDF into a temp file beside `dest` and return its path.
 
@@ -71,6 +74,8 @@ def write_pdf(
 
     allow_decrypt: indices of encrypted sources the user agreed to write out
     unprotected. Any other encrypted source raises EncryptionWouldBeLost.
+
+    annots: annotation edits per (file, source page); see annots.py.
     """
     dest = Path(dest)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{dest.stem}.", suffix=".tmp", dir=dest.parent)
@@ -148,6 +153,11 @@ def write_pdf(
             for page, ref in zip(base.pages, pages):
                 if ref.rotation:
                     page.rotate(ref.rotation, relative=True)
+                # Before prune_dangling: edits address /Annots by index, and
+                # pruning removes entries.
+                edits = annots.get((ref.file, ref.source))
+                if edits is not None:
+                    apply_edits(base, page.obj, edits)
 
             _import_outlines(base, pdfs, sources, foreign_origin)
 

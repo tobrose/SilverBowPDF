@@ -9,11 +9,16 @@ wrong rotation, a lost page or a shuffled order is visible at a glance.
                       CropBox, form fields, a scan-sized image, bookmarks.
   test-protected.pdf  Same file, password "test".
   test-long.pdf       300 plain pages, for scrolling and many-page edits.
+  test-annotations.pdf  3 pages of existing annotations -- a note with a
+                      popup and a reply, a rectangle, a highlight, a hidden
+                      note, a form field, a rotated page. The same file the
+                      annotation tests use.
 """
 
 from __future__ import annotations
 
 import math
+import sys
 import zlib
 from pathlib import Path
 
@@ -195,9 +200,22 @@ def build_long(path: Path, count: int = 300) -> None:
 
 if __name__ == "__main__":
     OUT.mkdir(exist_ok=True)
-    build_main(OUT / "test-pages.pdf")
-    build_main(OUT / "test-protected.pdf",
-               encryption=pikepdf.Encryption(user="test", owner="test-owner"))
-    build_long(OUT / "test-long.pdf")
-    for f in ("test-pages.pdf", "test-protected.pdf", "test-long.pdf"):
-        print(f"{OUT / f}  ({(OUT / f).stat().st_size / 1024:.0f} KB)")
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tests"))
+    from test_annots import _make_annotated_pdf
+
+    jobs = [
+        ("test-pages.pdf", build_main, {}),
+        ("test-protected.pdf", build_main,
+         {"encryption": pikepdf.Encryption(user="test", owner="test-owner")}),
+        ("test-long.pdf", build_long, {}),
+        ("test-annotations.pdf", _make_annotated_pdf, {}),
+    ]
+    for name, build, kwargs in jobs:
+        try:
+            build(OUT / name, **kwargs)
+            print(f"{OUT / name}  ({(OUT / name).stat().st_size / 1024:.0f} KB)")
+        except PermissionError:
+            # Windows won't replace a file another program has open.
+            print(f"{OUT / name}  SKIPPED -- open in another program; close it and rerun")
+        for leftover in OUT.glob(f".pikepdf.{name}*"):
+            leftover.unlink(missing_ok=True)

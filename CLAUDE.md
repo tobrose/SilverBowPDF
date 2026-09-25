@@ -26,6 +26,9 @@ pdfapp/
   transform.py   PageTransform. All coordinate math. LOAD-BEARING.
   pagelist.py    PageList (page edits as data) + History (snapshot undo). No Qt/pdfium/pikepdf.
                  PageRef = (file, page, rotation). File 0 is the opened document.
+  annots.py      Annotation edits as data (Annot, AnnotEdits, DocState). No libs.
+  annotpdf.py    Annotation edits -> PDF (pikepdf): apply_edits, new-annot APs,
+                 overlay_pdf for the live preview.
   document.py    pypdfium2 wrapper. NO Qt imports -- must stay headless-testable.
                  Takes *displayed* indices; maps them through its PageList to a
                  page of one of its sources. Sources are only ever added.
@@ -33,7 +36,8 @@ pdfapp/
                  prune_dangling() drops bookmarks/links/fields/dests aimed at removed pages.
                  Foreign pages: plain append + _merge_forms, NOT add_pages_from (see rule 6).
   rendering.py   pdfium bitmap -> QImage, plus an LRU page cache.
-  pageview.py    Continuous scroll view, zoom, view rotation.
+  pageview.py    Continuous scroll view, zoom, view rotation, tools, annotation
+                 select/move/delete. Emits edit requests; never edits.
   thumbnails.py  Page sidebar: multi-select, drag-to-reorder, lazy thumbnails.
                  Emits requests only; MainWindow makes the PageList edit.
   mainwindow.py  Menus, toolbar, status bar, drag-and-drop.
@@ -47,6 +51,15 @@ Dependency direction is one-way: `transform` <- `pagelist` <- `document` <-
 Page edits never mutate anything until save: pdfium keeps rendering the
 original file through the PageList. `tests/test_pages.py` asserts the preview
 and the saved file are pixel-identical -- keep that test passing.
+
+Annotation edits work the same way (DocState = pages + AnnotEdits, one undo
+history). A page with annotation edits is drawn in pdfium's own three passes:
+content without annotations, then a throwaway one-page PDF holding the page's
+annotations with edits applied (built by the same `apply_edits` the writer
+uses), then form fields. This is the one place pikepdf output feeds pdfium --
+deliberately, and only for a document that is never saved. Never draw
+annotation content with Qt; Qt draws selection chrome only.
+`tests/test_annots.py` asserts preview == saved, pixel for pixel.
 
 ## Hard rules
 
@@ -121,7 +134,14 @@ pages to a new file (split). Insert pages from other PDFs (merge), from a
 menu or by dropping files on the sidebar, carrying their form fields and
 bookmarks (in a folder named after the file).
 
-Next, in order: annotations, form filling, encryption, packaging.
+Annotations stage 1: tool modes (Select V, Note N, Esc), select / move /
+delete / edit-comment for existing annotations of any type (links, widgets,
+popups and hidden ones pass through untouched), sticky notes with their own
+appearance streams. Packaging done; installer verified where it's deployed.
+
+Next, in order (user chose all of these): text selection + highlight /
+underline / strikeout; text boxes / typewriter; shapes, ink, stamps;
+authoring fillable form fields; form filling; encryption.
 
 Deployment target is shared multi-session desktops: no GPU, non-persistent
 profiles, pixels re-encoded over a remote-display protocol. Keep memory and repaints lean; don't

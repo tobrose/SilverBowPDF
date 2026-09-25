@@ -12,17 +12,20 @@ from __future__ import annotations
 from enum import Enum
 from typing import List, Optional
 
-from PySide6.QtCore import QPoint, QRect, Qt, Signal
+from PySide6.QtCore import QPoint, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen, QWheelEvent
 from PySide6.QtWidgets import (
+    QApplication,
     QFrame,
     QLabel,
     QScrollArea,
     QSizePolicy,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
 
+from .annots import Annot, describe, without
 from .document import PdfDocument
 from .rendering import PageRenderer
 from .transform import PageTransform, normalize_rotation
@@ -41,18 +44,26 @@ class FitMode(Enum):
     PAGE = "page"
 
 
+class Tool(Enum):
+    SELECT = "select"
+    NOTE = "note"
+
+
 class PageWidget(QWidget):
     """A single rendered page."""
 
-    def __init__(self, document: PdfDocument, renderer: PageRenderer, index: int, parent=None):
+    def __init__(self, document: PdfDocument, renderer: PageRenderer, index: int,
+                 parent=None, view: Optional["PdfView"] = None):
         super().__init__(parent)
         self.document = document
         self.renderer = renderer
         self.index = index
+        self.view = view
         self._scale = 1.0
         self._rotation = 0
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.setAttribute(Qt.WA_OpaquePaintEvent, True)
+        self.setMouseTracking(True)  # hover cursor and note tooltips
         self.apply_view_state(1.0, 0)
 
     # ---- geometry ------------------------------------------------------
@@ -79,8 +90,27 @@ class PageWidget(QWidget):
         self.update()
 
     def pdf_point_at(self, pos: QPoint):
-        """Widget coordinates -> PDF user space. For annotations later."""
+        """Widget coordinates -> PDF user space. Mouse input only; see
+        widget_transform for why this must not use the render scale."""
         return self.widget_transform().widget_to_pdf(pos.x(), pos.y())
+
+    # ---- input: all of it is the view's business -------------------------
+
+    def mousePressEvent(self, event) -> None:
+        if self.view is None or not self.view.page_mouse_press(self, event):
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self.view is None or not self.view.page_mouse_move(self, event):
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self.view is None or not self.view.page_mouse_release(self, event):
+            super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        if self.view is None or not self.view.page_double_click(self, event):
+            super().mouseDoubleClickEvent(event)
 
     # ---- painting ------------------------------------------------------
 
@@ -106,6 +136,8 @@ class PageWidget(QWidget):
         image.setDevicePixelRatio(self.devicePixelRatioF())
         painter.drawImage(QPoint(0, 0), image)
         self._draw_border(painter, rect)
+        if self.view is not None:
+            self.view.paint_page_chrome(self, painter)
 
     @staticmethod
     def _draw_border(painter: QPainter, rect: QRect) -> None:
@@ -121,6 +153,12 @@ class PdfView(QScrollArea):
     page_changed = Signal(int)        # 0-based
     zoom_changed = Signal(float)
     document_opened = Signal(object)  # PdfDocument or None
+    # Annotation requests. The view never edits: MainWindow owns the undo
+    # history and turns these into DocState edits.
+    annots_edit = Signal(object, object, str)  # page key, new annot tuple, undo label
+    annot_open = Signal(int, object)           # page index, Annot (double-clicked)
+    note_requested = Signal(int, float, float) # page index, PDF x, y
+    tool_changed = Signal(object)              # Tool
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -131,6 +169,10 @@ class PdfView(QScrollArea):
         self._rotation = 0
         self._fit = FitMode.WIDTH
         self._current_page = 0
+        self._tool = Tool.SELECT
+        self._selected = None   # (page key, annot ident) or None
+        self._drag = None       # in-progress annotation move, see page_mouse_press
+        self.setFocusPolicy(Qt.StrongFocus)  # Delete and Esc for annotations
 
         self.setWidgetResizable(True)
         self.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
@@ -152,6 +194,162 @@ class PdfView(QScrollArea):
 
         self.verticalScrollBar().valueChanged.connect(self._update_current_page)
 
+    # ---- tools and annotations -------------------------------------------
+
+    @property
+    def tool(self) -> Tool:
+        return self._tool
+
+    def set_tool(self, tool: Tool) -> None:
+        if tool == self._tool:
+            return
+        self._tool = tool
+        self._drag = None
+        cursor = Qt.CrossCursor if tool is Tool.NOTE else Qt.ArrowCursor
+        for page in self._pages:
+            page.setCursor(cursor)
+        self.tool_changed.emit(tool)
+
+    def select_annot(self, index: int, ident) -> None:
+        self._selected = (self.document.page_key(index), ident) if ident is not None else None
+        for page in self._pages:
+            page.update()
+
+    def selected_annot(self):
+        """(page index, Annot) of the selected annotation, or None."""
+        if self._selected is None or self.document is None:
+            return None
+        key, ident = self._selected
+        for page in self._pages:
+            if self.document.page_key(page.index) == key:
+                for annot in self.document.page_annots(page.index):
+                    if annot.ident == ident:
+                        return page.index, annot
+        return None
+
+    def annots_changed(self) -> None:
+        """Annotation edits changed (edit, undo, redo). Sizes don't change,
+        so repaint only; the render cache keys on the edits themselves."""
+        if self.selected_annot() is None:
+            self._selected = None
+        for page in self._pages:
+            page.update()
+
+    def _annot_at(self, page: "PageWidget", pos: QPoint) -> Optional[Annot]:
+        x, y = page.pdf_point_at(pos)
+        slop = 3.0 / max(page.widget_transform().scale, 1e-6)  # ~3 screen px
+        for annot in reversed(self.document.page_annots(page.index)):  # topmost first
+            if annot.contains(x, y, slop):
+                return annot
+        return None
+
+    def page_mouse_press(self, page: "PageWidget", event) -> bool:
+        if event.button() != Qt.LeftButton or self.document is None:
+            return False
+        self.setFocus(Qt.MouseFocusReason)
+        pos = event.position().toPoint()
+        if self._tool is Tool.NOTE:
+            x, y = page.pdf_point_at(pos)
+            self.note_requested.emit(page.index, x, y)
+            return True
+        annot = self._annot_at(page, pos)
+        self.select_annot(page.index, annot.ident if annot else None)
+        if annot is not None:
+            self._drag = {"page": page, "annot": annot, "press": pos,
+                          "start": page.pdf_point_at(pos), "delta": None}
+        return True
+
+    def page_mouse_move(self, page: "PageWidget", event) -> bool:
+        if self.document is None:
+            return False
+        pos = event.position().toPoint()
+        drag = self._drag
+        if drag is not None and event.buttons() & Qt.LeftButton and drag["page"] is page:
+            if drag["delta"] is None and \
+                    (pos - drag["press"]).manhattanLength() < QApplication.startDragDistance():
+                return True
+            x, y = page.pdf_point_at(pos)
+            drag["delta"] = (x - drag["start"][0], y - drag["start"][1])
+            page.update()
+            return True
+        if self._tool is Tool.SELECT and not event.buttons():
+            annot = self._annot_at(page, pos)
+            page.setCursor(Qt.SizeAllCursor if annot else Qt.ArrowCursor)
+            if annot is not None and annot.contents:
+                who = f"{annot.author}: " if annot.author else ""
+                QToolTip.showText(event.globalPosition().toPoint(),
+                                  f"{who}{annot.contents}", page)
+            else:
+                QToolTip.hideText()
+        return False
+
+    def page_mouse_release(self, page: "PageWidget", event) -> bool:
+        drag, self._drag = self._drag, None
+        if drag is None or event.button() != Qt.LeftButton:
+            return False
+        if drag["delta"] is not None:
+            dx, dy = drag["delta"]
+            moved = drag["annot"]
+            annots = tuple(a.moved(dx, dy) if a.ident == moved.ident else a
+                           for a in self.document.page_annots(page.index))
+            self.annots_edit.emit(self.document.page_key(page.index), annots,
+                                  f"Move {describe(moved.kind)}")
+        page.update()
+        return True
+
+    def page_double_click(self, page: "PageWidget", event) -> bool:
+        if self._tool is not Tool.SELECT or self.document is None:
+            return False
+        annot = self._annot_at(page, event.position().toPoint())
+        if annot is None:
+            return False
+        self.annot_open.emit(page.index, annot)
+        return True
+
+    def delete_selected_annot(self) -> bool:
+        found = self.selected_annot()
+        if found is None:
+            return False
+        index, gone = found
+        annots = without(self.document.page_annots(index), gone)
+        self._selected = None
+        self.annots_edit.emit(self.document.page_key(index), annots, f"Delete {describe(gone.kind)}")
+        return True
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() in (Qt.Key_Delete, Qt.Key_Backspace) and self.delete_selected_annot():
+            return
+        if event.key() == Qt.Key_Escape:
+            self._drag = None
+            self.set_tool(Tool.SELECT)
+            if self._selected is not None:
+                self.select_annot(0, None)
+            return
+        super().keyPressEvent(event)
+
+    def paint_page_chrome(self, page: "PageWidget", painter: QPainter) -> None:
+        """Selection outline (and drag preview) over a rendered page. UI
+        chrome only -- the annotation itself is always drawn by pdfium."""
+        found = self.selected_annot()
+        if found is None or found[0] != page.index:
+            return
+        annot = found[1]
+        rect = annot.rect
+        drag = self._drag
+        if drag is not None and drag["page"] is page and drag["delta"] is not None:
+            rect = annot.moved(*drag["delta"]).rect
+            painter.fillRect(self._widget_rect(page, rect), QColor(40, 110, 230, 40))
+        r = self._widget_rect(page, rect).adjusted(-3, -3, 3, 3)
+        pen = QPen(QColor(40, 110, 230), 1.5, Qt.DashLine)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRect(r)
+
+    @staticmethod
+    def _widget_rect(page: "PageWidget", pdf_rect) -> QRectF:
+        left, top, right, bottom = page.widget_transform().pdf_rect_to_widget(pdf_rect)
+        return QRectF(left, top, right - left, bottom - top)
+
     # ---- document ------------------------------------------------------
 
     def set_document(self, document: Optional[PdfDocument], keep_view: bool = False) -> None:
@@ -163,6 +361,8 @@ class PdfView(QScrollArea):
         if self.document is not None:
             self.document.close()
         self.document = document
+        self._selected = None
+        self._drag = None
         self.renderer = PageRenderer(document) if document is not None else None
         target = self._current_page if keep_view else 0
         if not keep_view:
@@ -213,7 +413,7 @@ class PdfView(QScrollArea):
             return
 
         for i in range(self.document.page_count):
-            page = PageWidget(self.document, self.renderer, i, self._container)
+            page = PageWidget(self.document, self.renderer, i, self._container, view=self)
             page.apply_view_state(self._scale, self._rotation)
             self._layout.addWidget(page, 0, Qt.AlignHCenter)
             self._pages.append(page)

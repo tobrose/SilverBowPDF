@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import getpass
 from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence
 from PySide6.QtWidgets import (
     QComboBox,
     QDockWidget,
@@ -22,9 +23,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .annots import Annot, DocState, describe, new_note
 from .document import DocumentError, PasswordRequired, PdfDocument, SourceInfo
 from .pagelist import History, PageList
-from .pageview import FitMode, PdfView
+from .pageview import FitMode, PdfView, Tool
 from .thumbnails import ThumbnailSidebar
 from .writer import EncryptionWouldBeLost, SaveError, commit, write_pdf
 
@@ -50,7 +52,7 @@ class MainWindow(QMainWindow):
         self.resize(1100, 860)
         self.setAcceptDrops(True)
 
-        self.history: Optional[History[PageList]] = None
+        self.history: Optional[History[DocState]] = None
         # Set while reopening the same file with edits intact (a failed save),
         # so document_opened doesn't wipe the undo history.
         self._keep_history = False
@@ -59,6 +61,9 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.view)
         self.view.setContextMenuPolicy(Qt.CustomContextMenu)
         self.view.customContextMenuRequested.connect(self._page_context_menu)
+        self.view.annots_edit.connect(self._on_annots_edit)
+        self.view.annot_open.connect(self._on_annot_open)
+        self.view.note_requested.connect(self._on_note_requested)
 
         self.sidebar = ThumbnailSidebar(self)
         self.sidebar_dock = QDockWidget("Pages", self)
@@ -145,6 +150,19 @@ class MainWindow(QMainWindow):
                                         shortcut=QKeySequence("Ctrl+Shift+E"),
                                         triggered=lambda: self.extract_pages(sel()))
 
+        # Tools. Single-letter shortcuts, as in every editor; text fields
+        # still get their letters (Qt gives focused editors first refusal).
+        self.tool_group = QActionGroup(self)
+        self.act_tool_select = QAction("Select", self, shortcut=QKeySequence("V"),
+                                       checkable=True, checked=True,
+                                       triggered=lambda: self.view.set_tool(Tool.SELECT))
+        self.act_tool_note = QAction("Note", self, shortcut=QKeySequence("N"), checkable=True,
+                                     triggered=lambda: self.view.set_tool(Tool.NOTE))
+        for act in (self.act_tool_select, self.act_tool_note):
+            self.tool_group.addAction(act)
+        self.act_delete_annot = QAction("Delete Annotation", self,
+                                        triggered=self.view.delete_selected_annot)
+
         self.act_next = QAction("Next Page", self, shortcut=QKeySequence("PgDown"),
                                 triggered=self.view.next_page)
         self.act_prev = QAction("Previous Page", self, shortcut=QKeySequence("PgUp"),
@@ -195,6 +213,13 @@ class MainWindow(QMainWindow):
         bar.addAction(self.act_rotate_ccw)
         bar.addAction(self.act_rotate_cw)
 
+        tools = QToolBar("Tools", self)
+        tools.setMovable(False)
+        self.addToolBar(tools)
+        tools.addAction(self.act_tool_select)
+        tools.addAction(self.act_tool_note)
+        self.view.tool_changed.connect(self._on_tool_changed)
+
     def _build_menus(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
         file_menu.addAction(self.act_open)
@@ -207,6 +232,12 @@ class MainWindow(QMainWindow):
         edit_menu = self.menuBar().addMenu("&Edit")
         edit_menu.addAction(self.act_undo)
         edit_menu.addAction(self.act_redo)
+        edit_menu.addSeparator()
+        edit_menu.addAction(self.act_delete_annot)
+
+        tools_menu = self.menuBar().addMenu("&Tools")
+        tools_menu.addAction(self.act_tool_select)
+        tools_menu.addAction(self.act_tool_note)
 
         view_menu = self.menuBar().addMenu("&View")
         view_menu.addAction(self.act_zoom_in)
@@ -251,7 +282,8 @@ class MainWindow(QMainWindow):
                     self.act_zoom_100, self.act_fit_width, self.act_fit_page,
                     self.act_rotate_ccw, self.act_rotate_cw, self.act_page_rot_ccw,
                     self.act_page_rot_cw, self.act_page_up, self.act_page_down,
-                    self.act_page_delete, self.act_page_extract, self.act_page_insert, self.act_next,
+                    self.act_page_delete, self.act_page_extract, self.act_page_insert,
+                    self.act_tool_select, self.act_tool_note, self.act_delete_annot, self.act_next,
                     self.act_prev, self.act_first,
                     self.act_last, self.act_goto):
             act.setEnabled(enabled)
@@ -333,20 +365,69 @@ class MainWindow(QMainWindow):
         return f"Page {indices[0] + 1}" if len(indices) == 1 else f"{len(indices)} Pages"
 
     def _edit(self, pages: PageList, label: str, current: int, select: list[int]) -> None:
-        if self.history is None or pages == self.history.current:
+        if self.history is None:
             return
-        self.history.push(pages, label)
-        self._show_pages(pages, current, select)
+        state = DocState(pages, self.history.current.annots)
+        if state == self.history.current:
+            return
+        self.history.push(state, label)
+        self._show_state(state, current, select)
 
-    def _show_pages(self, pages: PageList, current: int,
+    def _show_state(self, state: DocState, current: int,
                     select: Optional[list[int]] = None) -> None:
-        self.view.document.pages = pages
-        current = max(0, min(len(pages) - 1, current))
-        self.sidebar.set_document(self.view.document)
-        self.view.pages_changed(current)
-        self.sidebar.select_rows(select if select else [current])
-        self._refresh_page_count()
+        doc = self.view.document
+        pages_changed = state.pages != doc.pages
+        doc.pages = state.pages
+        doc.annots = state.annots
+        if pages_changed:
+            current = max(0, min(len(state.pages) - 1, current))
+            self.sidebar.set_document(doc)
+            self.view.pages_changed(current)
+            self.sidebar.select_rows(select if select else [current])
+            self._refresh_page_count()
+        else:
+            # Annotations only: no relayout, keep the sidebar selection.
+            rows = self.sidebar.selected_rows()
+            self.sidebar.set_document(doc)
+            self.sidebar.select_rows(rows or [self.view.current_page])
+            self.view.annots_changed()
         self._refresh_edit_state()
+
+    # ---- annotation edits ----------------------------------------------
+
+    def _on_annots_edit(self, key, annots, label: str) -> None:
+        if self.history is None:
+            return
+        current = self.history.current
+        state = DocState(current.pages, current.annots.with_page(key, annots))
+        if state == current:
+            return
+        self.history.push(state, label)
+        self._show_state(state, self.view.current_page)
+
+    def _on_tool_changed(self, tool: Tool) -> None:
+        {Tool.SELECT: self.act_tool_select, Tool.NOTE: self.act_tool_note}[tool].setChecked(True)
+
+    def _on_note_requested(self, index: int, x: float, y: float) -> None:
+        text, ok = QInputDialog.getMultiLineText(self, "Add Note", "Note:")
+        self.view.set_tool(Tool.SELECT)
+        if not ok:
+            return
+        doc = self.view.document
+        # The click marks the icon's top-left corner, as in Acrobat.
+        note = new_note(x, y, text, getpass.getuser())
+        self._on_annots_edit(doc.page_key(index), doc.page_annots(index) + (note,), "Add Note")
+        self.view.select_annot(index, note.ident)
+
+    def _on_annot_open(self, index: int, annot: Annot) -> None:
+        doc = self.view.document
+        text, ok = QInputDialog.getMultiLineText(
+            self, f"Edit {describe(annot.kind)}", "Comment:", annot.contents)
+        if not ok or text == annot.contents:
+            return
+        annots = tuple(a.with_contents(text) if a.ident == annot.ident else a
+                       for a in doc.page_annots(index))
+        self._on_annots_edit(doc.page_key(index), annots, f"Edit {describe(annot.kind)}")
 
     def rotate_pages(self, indices: list[int], delta: int) -> None:
         if self.view.document is None or not indices:
@@ -390,11 +471,11 @@ class MainWindow(QMainWindow):
 
     def undo(self) -> None:
         if self.history is not None and self.history.can_undo():
-            self._show_pages(self.history.undo(), self.view.current_page)
+            self._show_state(self.history.undo(), self.view.current_page)
 
     def redo(self) -> None:
         if self.history is not None and self.history.can_redo():
-            self._show_pages(self.history.redo(), self.view.current_page)
+            self._show_state(self.history.redo(), self.view.current_page)
 
     def _refresh_edit_state(self) -> None:
         h = self.history
@@ -572,7 +653,8 @@ class MainWindow(QMainWindow):
         allowed: set[int] = set()
         while True:
             try:
-                return write_pdf(doc.sources, pages, dest, allow_decrypt=allowed), allowed
+                return write_pdf(doc.sources, pages, dest, allow_decrypt=allowed,
+                                 annots=doc.annots), allowed
             except EncryptionWouldBeLost as exc:
                 if exc.file == 0 and self._same_file(dest, doc.path):
                     QMessageBox.warning(
@@ -607,7 +689,7 @@ class MainWindow(QMainWindow):
     def _save_to(self, dest: Path) -> bool:
         """Write, swap in, reopen."""
         doc = self.view.document
-        pages = doc.pages
+        pages, annots = doc.pages, doc.annots
         written = self._write(pages, dest, "Save failed")
         if written is None:
             return False
@@ -623,7 +705,7 @@ class MainWindow(QMainWindow):
             commit(tmp, dest)
         except SaveError as exc:
             if overwriting:
-                self._reopen(sources, keep_edits=pages)
+                self._reopen(sources, keep_edits=DocState(pages, annots))
             QMessageBox.critical(self, "Save failed", f"{exc}\n\nThe original file is unchanged.")
             return False
 
@@ -643,13 +725,14 @@ class MainWindow(QMainWindow):
         return True
 
     def _reopen(self, sources: list[SourceInfo],
-                keep_edits: Optional[PageList] = None) -> None:
+                keep_edits: Optional[DocState] = None) -> None:
         document = PdfDocument(sources[0].path, password=sources[0].password)
         try:
             for source in sources[1:]:
                 document.add_source(source.path, source.password)
             if keep_edits is not None:
-                document.pages = keep_edits
+                document.pages = keep_edits.pages
+                document.annots = keep_edits.annots
         except Exception:
             document.close()
             raise
@@ -663,6 +746,7 @@ class MainWindow(QMainWindow):
 
     def _on_document_opened(self, document: Optional[PdfDocument]) -> None:
         self.sidebar.set_document(document)
+        self.view.set_tool(Tool.SELECT)
         if document is None:
             self.history = None
             self.setWindowTitle(APP_NAME)
@@ -674,7 +758,7 @@ class MainWindow(QMainWindow):
             return
 
         if not self._keep_history:
-            self.history = History(document.pages)
+            self.history = History(DocState(document.pages))
         # [*] is where Qt draws the unsaved-changes marker (setWindowModified).
         self.setWindowTitle(f"{document.path.name}[*] — {APP_NAME}")
         self._refresh_page_count()

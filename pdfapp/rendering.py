@@ -9,12 +9,15 @@ hardcoding one format is a bug waiting for the wrong PDF.
 
 from __future__ import annotations
 
+import functools
 import sys
 from collections import OrderedDict
+from pathlib import Path
 from typing import Optional, Tuple
 
 from PySide6.QtGui import QImage
 
+from .annotpdf import overlay_pdf
 from .document import PdfDocument
 
 _LITTLE_ENDIAN = sys.byteorder == "little"
@@ -73,13 +76,28 @@ class PageRenderer:
     def __init__(self, document: PdfDocument, max_pages: int = 12):
         self.document = document
         self.max_pages = max_pages
-        self._cache: "OrderedDict[Tuple[int, int, int], QImage]" = OrderedDict()
+        self._cache: "OrderedDict[tuple, QImage]" = OrderedDict()
 
-    @staticmethod
-    def _key(index: int, scale: float, rotation: int) -> Tuple[int, int, int]:
+    def _key(self, index: int, scale: float, rotation: int) -> tuple:
         # Quantise the scale so that float noise from fit calculations doesn't
-        # produce a cache miss on every repaint.
-        return (index, int(round(scale * 1000)), rotation % 360)
+        # produce a cache miss on every repaint. The page's annotation edits
+        # are part of the key, so an edit is never served a stale image.
+        edits = self.document.annots.get(self.document.page_key(index))
+        return (index, int(round(scale * 1000)), rotation % 360, edits)
+
+    def _overlay(self, index: int) -> Optional[bytes]:
+        """The page's edited annotations as a one-page PDF, or None if the
+        page has no annotation edits and renders straight from the file."""
+        doc = self.document
+        edits = doc.annots.get(doc.page_key(index))
+        if edits is None:
+            return None
+        ref = doc.pages[index]
+        source = doc.sources[ref.file]
+        media, crop, rotate = doc.page_geometry(index)
+        stat = Path(source.path).stat()
+        return _cached_overlay(str(source.path), stat.st_mtime_ns, stat.st_size,
+                               source.password, ref.source, edits, media, crop, rotate)
 
     def image(self, index: int, scale: float, view_rotation: int = 0) -> QImage:
         key = self._key(index, scale, view_rotation)
@@ -88,7 +106,7 @@ class PageRenderer:
             self._cache.move_to_end(key)
             return cached
 
-        bitmap = self.document.render_bitmap(index, scale, view_rotation)
+        bitmap = self.document.render_bitmap(index, scale, view_rotation, self._overlay(index))
         try:
             image = bitmap_to_qimage(bitmap)
         finally:
@@ -115,3 +133,11 @@ class PageRenderer:
 
     def clear(self) -> None:
         self._cache.clear()
+
+
+@functools.lru_cache(maxsize=32)
+def _cached_overlay(path, mtime_ns, size, password, page_index, edits, media, crop, rotate):
+    """Shared by every renderer (page view, thumbnails), so one edit builds
+    its overlay once. mtime and size are in the key so an overlay built from
+    a file's old contents is never reused after that file is saved over."""
+    return overlay_pdf(Path(path), password, page_index, edits, media, crop, rotate)
