@@ -12,7 +12,7 @@ winget install JRSoftware.InnoSetup
 .\packaging\build.ps1
 ```
 
-Output: `packaging\out\PDF Workbench-Setup-0.1.0.exe`. Double-click, Next,
+Output: `packaging\out\ButterPDF-Setup-0.1.0.exe`. Double-click, Next,
 Install. For deployment tooling: `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`.
 
 ## Why these tools

@@ -1,4 +1,4 @@
-# PDF Workbench
+# ButterPDF
 
 A desktop PDF viewer and (eventually) editor. Python + PySide6 + pdfium.
 

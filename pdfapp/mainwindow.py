@@ -28,7 +28,7 @@ from .pageview import FitMode, PdfView
 from .thumbnails import ThumbnailSidebar
 from .writer import EncryptionWouldBeLost, SaveError, commit, write_pdf
 
-APP_NAME = "PDF Workbench"
+APP_NAME = "ButterPDF"
 
 ZOOM_PRESETS = [
     ("Fit width", "fit-width"),

@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pdf-workbench"
+name = "butterpdf"
 version = "0.1.0"
 description = "Desktop PDF viewer and editor"
 requires-python = ">=3.11"
@@ -18,7 +18,7 @@ dev = ["pytest>=8.0"]
 build = ["pyinstaller>=6.6"]
 
 [project.gui-scripts]
-pdf-workbench = "pdfapp.__main__:main"
+butterpdf = "pdfapp.__main__:main"
 
 [tool.setuptools]
 packages = ["pdfapp"]

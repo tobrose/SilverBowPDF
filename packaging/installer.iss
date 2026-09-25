@@ -1,18 +1,18 @@
-; Inno Setup script for PDF Workbench.
+; Inno Setup script for ButterPDF.
 ;
 ; Build:  iscc packaging\installer.iss
-; Output: packaging\out\PDFWorkbench-Setup-0.1.0.exe
+; Output: packaging\out\ButterPDF-Setup-0.1.0.exe
 ;
 ; Interactive:  double-click, Next, Install, done.
 ; Silent (GPO or any deployment tool):
-;     PDFWorkbench-Setup-0.1.0.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+;     ButterPDF-Setup-0.1.0.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 ; Silent uninstall:
-;     "%ProgramFiles%\PDF Workbench\unins000.exe" /VERYSILENT /NORESTART
+;     "%ProgramFiles%\ButterPDF\unins000.exe" /VERYSILENT /NORESTART
 
-#define AppName "PDF Workbench"
+#define AppName "ButterPDF"
 #define AppVersion "0.1.0"
-#define AppPublisher "PDF Workbench"
-#define AppExeName "PDFWorkbench.exe"
+#define AppPublisher "ButterPDF"
+#define AppExeName "ButterPDF.exe"
 
 [Setup]
 ; AppId must never change across versions -- it is how Windows recognises an
@@ -64,9 +64,9 @@ Name: "associate"; Description: "Make {#AppName} the default app for .pdf files"
     GroupDescription: "File associations:"; Flags: unchecked
 
 [Files]
-; PyInstaller onedir output. Everything under dist\PDFWorkbench\.
-Source: "..\dist\PDFWorkbench\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\dist\PDFWorkbench\*"; DestDir: "{app}"; \
+; PyInstaller onedir output. Everything under dist\ButterPDF\.
+Source: "..\dist\ButterPDF\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\ButterPDF\*"; DestDir: "{app}"; \
     Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
@@ -83,17 +83,17 @@ Root: HKA; Subkey: "Software\Classes\Applications\{#AppExeName}\shell\open\comma
     Flags: uninsdeletekey
 
 ; Only if the user opted in.
-Root: HKA; Subkey: "Software\Classes\PDFWorkbench.Document"; \
+Root: HKA; Subkey: "Software\Classes\ButterPDF.Document"; \
     ValueType: string; ValueName: ""; ValueData: "PDF Document"; \
     Flags: uninsdeletekey; Tasks: associate
-Root: HKA; Subkey: "Software\Classes\PDFWorkbench.Document\DefaultIcon"; \
+Root: HKA; Subkey: "Software\Classes\ButterPDF.Document\DefaultIcon"; \
     ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExeName},0"; \
     Flags: uninsdeletekey; Tasks: associate
-Root: HKA; Subkey: "Software\Classes\PDFWorkbench.Document\shell\open\command"; \
+Root: HKA; Subkey: "Software\Classes\ButterPDF.Document\shell\open\command"; \
     ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}"" ""%1"""; \
     Flags: uninsdeletekey; Tasks: associate
 Root: HKA; Subkey: "Software\Classes\.pdf"; \
-    ValueType: string; ValueName: ""; ValueData: "PDFWorkbench.Document"; \
+    ValueType: string; ValueName: ""; ValueData: "ButterPDF.Document"; \
     Flags: uninsdeletevalue; Tasks: associate
 
 [Run]

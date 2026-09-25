@@ -1,4 +1,4 @@
-# PyInstaller spec for PDF Workbench.
+# PyInstaller spec for ButterPDF.
 #
 # Build:  pyinstaller packaging/pdfapp.spec --noconfirm
 #
@@ -107,7 +107,7 @@ exe = EXE(  # noqa: F821
     a.scripts,
     [],
     exclude_binaries=True,
-    name="PDFWorkbench",
+    name="ButterPDF",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -130,5 +130,5 @@ coll = COLLECT(  # noqa: F821
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="PDFWorkbench",
+    name="ButterPDF",
 )

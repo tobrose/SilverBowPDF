@@ -1,4 +1,4 @@
-"""Entry point: ``python -m pdfapp [file.pdf]`` and the frozen PDFWorkbench.exe."""
+"""Entry point: ``python -m pdfapp [file.pdf]`` and the frozen ButterPDF.exe."""
 
 from __future__ import annotations
 

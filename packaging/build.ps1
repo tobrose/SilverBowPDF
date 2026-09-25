@@ -1,4 +1,4 @@
-# Build PDF Workbench into a single-click Windows installer.
+# Build ButterPDF into a single-click Windows installer.
 #
 #   .\packaging\build.ps1              full build
 #   .\packaging\build.ps1 -SkipTests   skip the test gate (don't)
@@ -51,10 +51,10 @@ Step "Running PyInstaller"
 & $venvPython -m PyInstaller packaging\pdfapp.spec --noconfirm --clean
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed." }
 
-$exe = "dist\PDFWorkbench\PDFWorkbench.exe"
+$exe = "dist\ButterPDF\ButterPDF.exe"
 if (-not (Test-Path $exe)) { throw "Expected $exe, not found." }
 
-$sizeMB = [math]::Round((Get-ChildItem dist\PDFWorkbench -Recurse |
+$sizeMB = [math]::Round((Get-ChildItem dist\ButterPDF -Recurse |
     Measure-Object -Property Length -Sum).Sum / 1MB, 1)
 Write-Host "Frozen bundle: $sizeMB MB" -ForegroundColor Green
 
@@ -85,7 +85,8 @@ if ($NoInstaller) { Step "Done (installer skipped)"; exit 0 }
 Step "Building installer"
 $iscc = @(
     "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
-    "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+    "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+    "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"  # winget's per-user install
 ) | Where-Object { Test-Path $_ } | Select-Object -First 1
 
 if (-not $iscc) {
