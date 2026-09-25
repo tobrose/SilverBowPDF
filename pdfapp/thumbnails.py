@@ -14,10 +14,11 @@ import time
 from collections import OrderedDict
 from typing import List, Optional, Sequence, Tuple
 
-from PySide6.QtCore import QItemSelectionModel, QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QItemSelectionModel, QPoint, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QIcon, QImage, QKeySequence, QPainter, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QListWidget,
     QListWidgetItem,
     QStyledItemDelegate,
@@ -66,10 +67,16 @@ class ThumbnailSidebar(QListWidget):
         self.setUniformItemSizes(True)
         self.setSpacing(4)
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.setDragDropMode(QAbstractItemView.InternalMove)
-        self.setDefaultDropAction(Qt.MoveAction)
-        self.setDropIndicatorShown(True)
+        # Reordering is a hand-rolled drag (see "reorder drag" below), not Qt
+        # drag-and-drop: on Windows QDrag runs inside OLE's DoDragDrop loop,
+        # which swallows wheel events, so you can't scroll mid-drag.
+        self.setDragDropMode(QAbstractItemView.NoDragDrop)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # QListView defaults to scrolling a whole item per step: at 180px
+        # thumbnails, edge autoscroll lurches a page at a time and the wheel
+        # jumps several pages per notch.
+        self.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.verticalScrollBar().setSingleStep(24)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(
             lambda pos: self.context_requested.emit(
@@ -86,6 +93,15 @@ class ThumbnailSidebar(QListWidget):
         self._timer = QTimer(self, singleShot=True, interval=0)
         self._timer.timeout.connect(self._render_visible)
         self._following = False
+
+        self._press_pos: Optional[QPoint] = None   # viewport coords of LMB press
+        self._press_row = -1
+        self._deferred_select = -1   # row to single-select on release if no drag
+        self._drag_rows: Optional[List[int]] = None
+        self._drag_pos = QPoint()    # last cursor position, viewport coords
+        self._drop_before = -1
+        self._autoscroll = QTimer(self, interval=16)
+        self._autoscroll.timeout.connect(self._autoscroll_tick)
 
     # ---- content -------------------------------------------------------
 
@@ -158,27 +174,151 @@ class ThumbnailSidebar(QListWidget):
         if rows:
             self.delete_requested.emit(rows)
 
-    def dropEvent(self, event) -> None:
-        if event.source() is not self:
-            event.ignore()
-            return
-        rows = self.selected_rows()
-        target = self.indexAt(event.position().toPoint())
-        if not target.isValid():
-            before = self.count()
-        else:
-            rect = self.visualRect(target)
-            below = event.position().y() > rect.center().y()
-            before = target.row() + (1 if below else 0)
+    # ---- reorder drag --------------------------------------------------
+    #
+    # Press, move past the drag threshold, release. The mouse is implicitly
+    # grabbed while the button is down, so moves keep arriving even outside
+    # the sidebar, and the wheel keeps working because we never leave the
+    # normal event loop.
 
-        # IgnoreAction, not Move: on a Move, Qt's drag code removes the
-        # "moved" rows itself afterwards, fighting the rebuild below.
-        event.setDropAction(Qt.IgnoreAction)
-        event.accept()
-        if rows:
-            # Deferred: the rebuild deletes items the drag machinery is still
-            # holding until this handler returns.
-            QTimer.singleShot(0, lambda: self.move_requested.emit(rows, before))
+    def mousePressEvent(self, event) -> None:
+        self._cancel_drag()
+        if event.button() == Qt.LeftButton:
+            pos = event.position().toPoint()
+            index = self.indexAt(pos)
+            self._press_pos, self._press_row = pos, index.row() if index.isValid() else -1
+            # Plain press on a page that's already part of a multi-selection:
+            # the user may be about to drag the whole selection, so don't
+            # collapse it to one page until we know it was just a click.
+            if (index.isValid() and event.modifiers() == Qt.NoModifier
+                    and self.item(index.row()).isSelected() and len(self.selectedItems()) > 1):
+                self._deferred_select = index.row()
+                self.setFocus()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        pos = event.position().toPoint()
+        if self._drag_rows is not None:
+            self._drag_pos = pos
+            self._update_drop()
+            return
+        if (event.buttons() & Qt.LeftButton and self._press_pos is not None
+                and self._press_row >= 0
+                and (pos - self._press_pos).manhattanLength() >= QApplication.startDragDistance()):
+            self._start_drag(pos)
+            return
+        if self._deferred_select >= 0:
+            return  # don't let a tiny wobble rubber-band the selection away
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton and self._drag_rows is not None:
+            rows, before = self._drag_rows, self._drop_before
+            self._cancel_drag()
+            if before >= 0:
+                # Deferred so the rebuild doesn't delete items while Qt is
+                # still dispatching this event to them.
+                QTimer.singleShot(0, lambda: self.move_requested.emit(rows, before))
+            return
+        if event.button() == Qt.LeftButton and self._deferred_select >= 0:
+            row = self._deferred_select
+            self._deferred_select = -1
+            self._press_pos = None
+            self.clearSelection()
+            self.setCurrentRow(row)  # a plain click after all
+            return
+        self._press_pos = None
+        super().mouseReleaseEvent(event)
+
+    def wheelEvent(self, event) -> None:
+        super().wheelEvent(event)
+        if self._drag_rows is not None:
+            self._update_drop()  # content moved under a still cursor
+
+    def keyPressEvent(self, event) -> None:
+        if self._drag_rows is not None and event.key() == Qt.Key_Escape:
+            self._cancel_drag()
+            return
+        super().keyPressEvent(event)
+
+    def focusOutEvent(self, event) -> None:
+        self._cancel_drag()  # alt-tab mid-drag must not leave a stuck drag
+        super().focusOutEvent(event)
+
+    def _start_drag(self, pos: QPoint) -> None:
+        if not self.item(self._press_row).isSelected():
+            self.clearSelection()
+            self.setCurrentRow(self._press_row)
+        self._deferred_select = -1
+        # The press put the base view into drag-selecting; it won't see the
+        # release, so clear that or later hovers keep extending the selection.
+        self.setState(QAbstractItemView.NoState)
+        self._drag_rows = self.selected_rows()
+        self._drag_pos = pos
+        self.viewport().setCursor(Qt.ClosedHandCursor)
+        self._autoscroll.start()
+        self._update_drop()
+
+    def _cancel_drag(self) -> None:
+        was_dragging = self._drag_rows is not None
+        self._drag_rows = None
+        self._drop_before = -1
+        self._press_pos = None
+        self._deferred_select = -1
+        self._autoscroll.stop()
+        if was_dragging:
+            self.viewport().unsetCursor()
+            self.viewport().update()
+
+    def drop_row_at(self, y: int) -> int:
+        """Insert-before row for a cursor at viewport height y: the number of
+        pages whose middle is above it. Gaps and past-the-end fall out right."""
+        before = 0
+        for row in range(self.count()):
+            if self.visualItemRect(self.item(row)).center().y() < y:
+                before = row + 1
+            else:
+                break
+        return before
+
+    def _update_drop(self) -> None:
+        self._drop_before = self.drop_row_at(self._drag_pos.y())
+        self.viewport().update()
+
+    def _autoscroll_tick(self) -> None:
+        """Scroll while the cursor is near or beyond the top/bottom edge,
+        faster the further in. Past the edge counts as full speed."""
+        if self._drag_rows is None:
+            self._autoscroll.stop()
+            return
+        edge = min(60, self.viewport().height() // 4)
+        y, h = self._drag_pos.y(), self.viewport().height()
+        if y < edge:
+            depth = edge - y
+        elif y > h - edge:
+            depth = -(y - (h - edge))
+        else:
+            return
+        speed = max(2, min(40, abs(depth) * 40 // max(1, edge)))
+        bar = self.verticalScrollBar()
+        before = bar.value()
+        bar.setValue(before - speed if depth > 0 else before + speed)
+        if bar.value() != before:
+            self._update_drop()
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        if self._drag_rows is None or self._drop_before < 0 or self.count() == 0:
+            return
+        if self._drop_before < self.count():
+            y = self.visualItemRect(self.item(self._drop_before)).top() - self.spacing()
+        else:
+            y = self.visualItemRect(self.item(self.count() - 1)).bottom() + self.spacing()
+        painter = QPainter(self.viewport())
+        painter.setPen(QPen(self.palette().highlight().color(), 3))
+        painter.drawLine(6, y, self.viewport().width() - 6, y)
+        painter.end()
 
     # ---- lazy rendering ------------------------------------------------
 
