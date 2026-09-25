@@ -190,6 +190,135 @@ def test_saved_file_matches_preview():
         assert not leftovers, f"temp files left behind: {leftovers}"
 
 
+def _page_objects_in_file(path) -> int:
+    with pikepdf.open(path) as pdf:
+        return sum(1 for o in pdf.objects
+                   if isinstance(o, pikepdf.Dictionary) and o.get("/Type") == pikepdf.Name.Page)
+
+
+def _make_referencing_pdf(path):
+    """Five pages, and every kind of reference to page 4 (index 3)."""
+    from pikepdf import Array, Dictionary, Name, OutlineItem, String
+    pdf = pikepdf.Pdf.new()
+    for _ in range(5):
+        pdf.add_blank_page()
+    p = [pg.obj for pg in pdf.pages]
+
+    with pdf.open_outline() as outline:
+        for i in range(5):
+            outline.root.append(OutlineItem(f"page {i + 1}", i))
+        folder = OutlineItem("folder -> page 4", 3)       # dead, but has a live child
+        folder.children.append(OutlineItem("child -> page 1", 0))
+        folder.children.append(OutlineItem("child -> page 4", 3))
+        outline.root.append(folder)
+        outline.root.append(OutlineItem("named -> page 4", Name("/Four")))
+
+    pdf.Root.Dests = Dictionary(Four=Array([p[3], Name.Fit]), One=Array([p[0], Name.Fit]))
+    pdf.Root.Names = Dictionary(Dests=Dictionary(Names=Array([
+        String("four"), Array([p[3], Name.Fit]), String("two"), Array([p[1], Name.Fit]),
+    ])))
+
+    def link(to):
+        return pdf.make_indirect(Dictionary(Type=Name.Annot, Subtype=Name.Link,
+                                            Rect=Array([0, 0, 50, 50]),
+                                            Dest=Array([p[to], Name.Fit])))
+
+    def widget(page, parent=None, **kw):
+        d = Dictionary(Type=Name.Annot, Subtype=Name.Widget, Rect=Array([0, 0, 50, 20]),
+                       P=p[page], **kw)
+        if parent is not None:
+            d.Parent = parent
+        return pdf.make_indirect(d)
+
+    only_on_4 = widget(3, FT=Name.Tx, T=String("only_on_4"))
+    shared = pdf.make_indirect(Dictionary(FT=Name.Tx, T=String("shared")))
+    shared.Kids = Array([widget(0, shared), widget(3, shared)])
+    p[0].Annots = Array([link(3), link(1), shared.Kids[0]])
+    p[3].Annots = Array([only_on_4, shared.Kids[1], link(0)])
+    pdf.Root.AcroForm = Dictionary(Fields=Array([only_on_4, shared]))
+    pdf.Root.OpenAction = Array([p[3], Name.Fit])
+    pdf.save(path)
+
+
+def test_removed_pages_leave_nothing_behind():
+    with tempfile.TemporaryDirectory() as tmp:
+        src, out = Path(tmp, "refs.pdf"), Path(tmp, "out.pdf")
+        _make_referencing_pdf(src)
+
+        commit(write_pdf(src, None, PageList.identity(5).deleted([3]), out), out)
+        assert _page_objects_in_file(out) == 4, "removed page still stored in the file"
+
+        with pikepdf.open(out) as pdf:
+            with pdf.open_outline() as outline:
+                tree = [(i.title, [c.title for c in i.children]) for i in outline.root]
+            assert tree == [("page 1", []), ("page 2", []), ("page 3", []), ("page 5", []),
+                            ("folder -> page 4", ["child -> page 1"])], tree
+            folder = pdf.Root.Outlines.First
+            while str(folder.Title) != "folder -> page 4":
+                folder = folder.Next
+            assert "/Dest" not in folder, "folder kept, but its dead target must go"
+
+            assert set(pdf.Root.Dests.keys()) == {"/One"}
+            assert list(pikepdf.NameTree(pdf.Root.Names.Dests).keys()) == ["two"]
+
+            annots = pdf.pages[0].obj.Annots
+            links = [a for a in annots if a.Subtype == pikepdf.Name.Link]
+            assert len(links) == 1 and links[0].Dest[0].objgen == pdf.pages[1].obj.objgen
+
+            fields = pdf.Root.AcroForm.Fields
+            assert [str(f.T) for f in fields] == ["shared"]
+            assert len(fields[0].Kids) == 1
+            assert "/OpenAction" not in pdf.Root
+
+        with PdfDocument(out) as doc:  # and pdfium still likes it
+            assert doc.page_count == 4
+            _render(doc, 0)
+
+
+def test_nothing_pruned_when_nothing_removed():
+    with tempfile.TemporaryDirectory() as tmp:
+        src, out = Path(tmp, "refs.pdf"), Path(tmp, "out.pdf")
+        _make_referencing_pdf(src)
+        commit(write_pdf(src, None, PageList.identity(5).moved([4], 0), out), out)
+        with pikepdf.open(out) as pdf:
+            with pdf.open_outline() as outline:
+                assert len(outline.root) == 7
+            assert len(pdf.Root.AcroForm.Fields) == 2
+            assert len(pdf.Root.Dests.keys()) == 2
+            assert "/OpenAction" in pdf.Root
+
+
+def test_inherited_page_attributes_survive_reorder():
+    """Size, rotation and fonts can live on a parent /Pages node instead of
+    the page. Reordering rebuilds the tree, so they must be pushed down first."""
+    with tempfile.TemporaryDirectory() as tmp:
+        src, out = Path(tmp, "inherit.pdf"), Path(tmp, "out.pdf")
+        _make_pdf(src)
+        with pikepdf.open(src, allow_overwriting_input=True) as pdf:
+            root = pdf.Root.Pages
+            first = pdf.pages[0].obj
+            # Hoist page 1's attributes to the root, and make pages 1 and 3
+            # rely on inheriting them.
+            root.MediaBox = first.MediaBox
+            root.Resources = first.Resources
+            root.Rotate = 90
+            for i in (0, 2):
+                page = pdf.pages[i].obj
+                for key in ("/MediaBox", "/Resources", "/Rotate", "/CropBox"):
+                    if key in page:
+                        del page[key]
+            pdf.save(src)
+
+        edits = PageList.identity(len(PAGES)).moved([0], 4).deleted([1])
+        with PdfDocument(src) as doc:
+            assert doc.page_rotation(0) == 90, "fixture: page 1 should inherit /Rotate"
+            doc.pages = edits
+            preview = [_render(doc, i) for i in range(doc.page_count)]
+        commit(write_pdf(src, None, edits, out), out)
+        with PdfDocument(out) as saved:
+            assert [_render(saved, i) for i in range(saved.page_count)] == preview
+
+
 def test_encrypted_source_is_not_silently_decrypted():
     with tempfile.TemporaryDirectory() as tmp:
         src, out = Path(tmp, "enc.pdf"), Path(tmp, "out.pdf")

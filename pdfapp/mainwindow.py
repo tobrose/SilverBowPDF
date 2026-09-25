@@ -137,6 +137,9 @@ class MainWindow(QMainWindow):
         self.act_page_delete = QAction("&Delete Pages", self,
                                        shortcut=QKeySequence("Ctrl+Shift+D"),
                                        triggered=lambda: self.delete_pages(sel()))
+        self.act_page_extract = QAction("E&xtract Pages…", self,
+                                        shortcut=QKeySequence("Ctrl+Shift+E"),
+                                        triggered=lambda: self.extract_pages(sel()))
 
         self.act_next = QAction("Next Page", self, shortcut=QKeySequence("PgDown"),
                                 triggered=self.view.next_page)
@@ -224,6 +227,8 @@ class MainWindow(QMainWindow):
         pages_menu.addAction(self.act_page_up)
         pages_menu.addAction(self.act_page_down)
         pages_menu.addSeparator()
+        pages_menu.addAction(self.act_page_extract)
+        pages_menu.addSeparator()
         pages_menu.addAction(self.act_page_delete)
 
         go_menu = self.menuBar().addMenu("&Go")
@@ -241,7 +246,8 @@ class MainWindow(QMainWindow):
                     self.act_zoom_100, self.act_fit_width, self.act_fit_page,
                     self.act_rotate_ccw, self.act_rotate_cw, self.act_page_rot_ccw,
                     self.act_page_rot_cw, self.act_page_up, self.act_page_down,
-                    self.act_page_delete, self.act_next, self.act_prev, self.act_first,
+                    self.act_page_delete, self.act_page_extract, self.act_next,
+                    self.act_prev, self.act_first,
                     self.act_last, self.act_goto):
             act.setEnabled(enabled)
         self.page_spin.setEnabled(enabled)
@@ -413,9 +419,81 @@ class MainWindow(QMainWindow):
         menu.addAction("Move Later", lambda: self.move_pages_by(indices, +1)).setEnabled(
             min(indices) + len(indices) < n)
         menu.addSeparator()
+        menu.addAction(f"Extract {what}…", lambda: self.extract_pages(indices))
+        menu.addSeparator()
         menu.addAction(f"Delete {what}",
                        lambda: self.delete_pages(indices)).setEnabled(len(indices) < n)
         menu.exec(global_pos)
+
+    # ---- extract -------------------------------------------------------
+
+    @staticmethod
+    def _extract_name(stem: str, indices: list[int]) -> str:
+        nums = [i + 1 for i in indices]
+        if len(nums) == 1:
+            return f"{stem} (page {nums[0]}).pdf"
+        if nums == list(range(nums[0], nums[-1] + 1)):
+            return f"{stem} (pages {nums[0]}-{nums[-1]}).pdf"
+        return f"{stem} ({len(nums)} pages).pdf"
+
+    def extract_pages(self, indices: list[int]) -> bool:
+        """Write the given pages, as currently shown, to a new file.
+
+        The open document is not changed. Unsaved rotations and reordering
+        are included -- extract what you see.
+        """
+        doc = self.view.document
+        if doc is None or not indices:
+            return False
+        indices = sorted(indices)
+        suggested = doc.path.with_name(self._extract_name(doc.path.stem, indices))
+        dest, _ = QFileDialog.getSaveFileName(
+            self, f"Extract {self._describe(indices)}", str(suggested), "PDF documents (*.pdf)"
+        )
+        if not dest:
+            return False
+        dest = Path(dest)
+        if dest.suffix.lower() != ".pdf":
+            dest = dest.with_name(dest.name + ".pdf")
+        if self._same_file(dest, doc.path):
+            QMessageBox.warning(
+                self, "Choose a different file",
+                f"{dest.name} is the document you have open. Extracting over it "
+                f"would replace the whole document with just these pages.\n\n"
+                f"To keep only these pages, delete the others and save instead.",
+            )
+            return False
+
+        pages = PageList(doc.pages[i] for i in indices)
+        allow_decrypt = False
+        while True:
+            try:
+                tmp = write_pdf(doc.path, doc.password, pages, dest,
+                                allow_decrypt=allow_decrypt)
+                commit(tmp, dest)
+                break
+            except EncryptionWouldBeLost:
+                if not self._confirm_unprotected_copy(doc.path, dest):
+                    return False
+                allow_decrypt = True
+            except Exception as exc:  # nothing we wrote survives a failure
+                QMessageBox.critical(self, "Extract failed",
+                                     f"Could not write {dest.name}:\n\n{exc}")
+                return False
+
+        self.statusBar().showMessage(
+            f"Extracted {self._describe(indices).lower()} to {dest}", 8000)
+        return True
+
+    def _confirm_unprotected_copy(self, source: Path, dest: Path) -> bool:
+        answer = QMessageBox.warning(
+            self, "Save unprotected copy?",
+            f"{source.name} is password-protected. The copy saved as "
+            f"{dest.name} will NOT have a password — anyone who gets the "
+            f"file can open it.\n\nThe original stays protected.",
+            QMessageBox.Save | QMessageBox.Cancel, QMessageBox.Cancel,
+        )
+        return answer == QMessageBox.Save
 
     # ---- saving --------------------------------------------------------
 
@@ -451,14 +529,7 @@ class MainWindow(QMainWindow):
         except EncryptionWouldBeLost:
             if self._same_file(dest, doc.path):
                 return self.save()  # explains; never overwrite the protected original
-            answer = QMessageBox.warning(
-                self, "Save unprotected copy?",
-                f"{doc.path.name} is password-protected. The copy saved as "
-                f"{dest.name} will NOT have a password — anyone who gets the "
-                f"file can open it.\n\nThe original stays protected.",
-                QMessageBox.Save | QMessageBox.Cancel, QMessageBox.Cancel,
-            )
-            if answer != QMessageBox.Save:
+            if not self._confirm_unprotected_copy(doc.path, dest):
                 return False
             return self._save_to(dest, allow_decrypt=True)
 

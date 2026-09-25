@@ -28,6 +28,7 @@ pdfapp/
   document.py    pypdfium2 wrapper. NO Qt imports -- must stay headless-testable.
                  Takes *displayed* indices; maps them through its PageList to source pages.
   writer.py      The only code that writes PDFs. pikepdf. write to temp -> commit (os.replace).
+                 prune_dangling() drops bookmarks/links/fields/dests aimed at removed pages.
   rendering.py   pdfium bitmap -> QImage, plus an LRU page cache.
   pageview.py    Continuous scroll view, zoom, view rotation.
   thumbnails.py  Page sidebar: multi-select, drag-to-reorder, lazy thumbnails.
@@ -77,7 +78,14 @@ warning or a resize.
 caller passes `allow_decrypt=True` after the user explicitly agreed, and the
 protected original is never overwritten with an unprotected file.
 
-**6. Never silently swallow a pdfium exception.** `PageWidget.paintEvent` draws
+**6. Never reorder pages with pikepdf's slice assignment, insert or reverse.**
+They silently COPY a page that's already in the tree, so every bookmark, link
+and form field keeps pointing at the stale original, which then rides along in
+the file as dead weight. `write_pdf` empties the tree and appends the same Page
+objects back, and raises if object identity changed. `tests/test_pages.py`
+checks that no removed page object survives in a saved file.
+
+**7. Never silently swallow a pdfium exception.** `PageWidget.paintEvent` draws
 the error onto the failed page so one corrupt page does not take down the
 window. Follow that pattern: isolate, display, don't hide.
 
@@ -98,9 +106,12 @@ Built: open (incl. encrypted), continuous scroll, zoom to cursor, fit
 width/page, view rotation, navigation, form-field rendering, drag-and-drop,
 per-page error isolation. Page operations (rotate, delete, reorder) on
 the sidebar selection, with undo/redo, Save / Save As, and an unsaved-changes
-prompt. Thumbnail sidebar with multi-select and drag-to-reorder.
+prompt. Thumbnail sidebar with multi-select and drag-to-reorder. Extract
+pages to a new file (split).
 
-Next, in order: merge/split, annotations, form filling, encryption, packaging.
+Next, in order: insert pages from another PDF (merge -- PageRef needs a
+source file, which touches document, rendering, writer and undo), annotations,
+form filling, encryption, packaging.
 
 Deployment target is shared multi-session desktops: no GPU, non-persistent
 profiles, pixels re-encoded over a remote-display protocol. Keep memory and repaints lean; don't
@@ -110,8 +121,9 @@ count on per-user settings surviving logoff.
 
 - Save resets undo history. The saved file becomes the new source, and old
   PageList snapshots index into the previous file.
-- Deleting pages leaves their form fields in /AcroForm and outline entries
-  pointing at nothing. Viewers tolerate it; clean up when merge/split lands.
+- Removing pages doesn't rewrite the tagged-PDF structure tree or
+  /PageLabels. Both are index/structure based; rewriting them wrong is worse
+  than leaving them.
 - Encrypted files: Save is refused, Save As writes an unprotected copy after
   an explicit warning. Real re-encryption is the encryption milestone.
 

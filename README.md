@@ -34,6 +34,7 @@ on a headless box.
 | `Ctrl+Shift+L` `Ctrl+Shift+R` | Rotate selected pages left / right (saved) |
 | `Alt+Up` `Alt+Down` | Move selected pages earlier / later |
 | `Ctrl+Shift+D`, or `Delete` in the sidebar | Delete selected pages |
+| `Ctrl+Shift+E` | Extract selected pages to a new PDF |
 | Drag thumbnails | Reorder pages (Ctrl/Shift+click to select several) |
 | `Ctrl+Z` `Ctrl+Y` | Undo / redo |
 | `Ctrl+S` `Ctrl+Shift+S` | Save / save as |
@@ -74,9 +75,9 @@ Working: open (including encrypted, with a password prompt), continuous scroll,
 zoom to cursor, fit width/page, view rotation, page navigation, form-field
 rendering, drag-and-drop, per-page error isolation, page operations
 (rotate/delete/reorder) with undo and save, thumbnail sidebar with
-multi-select and drag to reorder.
+multi-select and drag to reorder, extract pages to a new PDF.
 
-Not built yet, in intended order: merge/split, annotations, form filling, encryption,
+Not built yet, in intended order: insert pages from another PDF, annotations, form filling, encryption,
 packaging.
 
 ## Known limits
