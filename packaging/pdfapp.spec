@@ -89,6 +89,17 @@ a = Analysis(  # noqa: F821
     noarchive=False,
 )
 
+# Excluding the Python modules above doesn't stop their DLLs arriving as
+# dependencies of Qt plugins: the imageformats/qpdf plugin drags in Qt6Pdf
+# (Qt's own pdfium copy -- the thing the QtPdf exclusion was meant to stop),
+# and Quick/Qml ride in the same way. ~16MB this app never loads. The frozen
+# self-test in build.ps1 is what proves nothing needed went with them.
+DROP_BINARIES = ("Qt6Pdf", "Qt6Quick", "Qt6Qml", "qpdf.dll")
+a.binaries = [  # noqa: F821
+    b for b in a.binaries  # noqa: F821
+    if not any(Path(b[0]).name.startswith(d) or Path(b[0]).name == d for d in DROP_BINARIES)
+]
+
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)  # noqa: F821
 
 exe = EXE(  # noqa: F821

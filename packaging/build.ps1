@@ -34,8 +34,10 @@ Step "Installing dependencies"
 # means shipping an installer whose annotations land in the wrong place.
 if (-not $SkipTests) {
     Step "Running tests"
-    & $venvPython tests\test_transform.py
-    if ($LASTEXITCODE -ne 0) { throw "Tests failed. Not building." }
+    foreach ($test in Get-ChildItem tests\test_*.py) {
+        & $venvPython $test.FullName
+        if ($LASTEXITCODE -ne 0) { throw "$($test.Name) failed. Not building." }
+    }
 }
 
 # --- clean -----------------------------------------------------------------
@@ -67,6 +69,15 @@ if ($proc.HasExited) {
 }
 Stop-Process -Id $proc.Id -Force
 Write-Host "App launched and stayed up." -ForegroundColor Green
+
+# Staying up proves the imports; the self-test proves the DLLs and data files
+# behind them: render through pdfium, edit and save through pikepdf, reopen,
+# open an encrypted file. Same command works on any machine after install.
+Step "Self-testing the frozen bundle"
+$log = Join-Path $root "dist\selftest.log"
+$proc = Start-Process -FilePath $exe -ArgumentList "--self-test", "`"$log`"" -PassThru -Wait
+Get-Content $log | Write-Host
+if ($proc.ExitCode -ne 0) { throw "Frozen self-test failed (exit $($proc.ExitCode)). See $log." }
 
 if ($NoInstaller) { Step "Done (installer skipped)"; exit 0 }
 

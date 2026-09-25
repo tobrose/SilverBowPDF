@@ -13,6 +13,12 @@ from pdfapp.mainwindow import APP_NAME, MainWindow
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv if argv is None else argv
+    if "--self-test" in argv:
+        from pdfapp.selftest import run
+
+        rest = argv[argv.index("--self-test") + 1:]
+        return run(rest[0] if rest else None)
+
     app = QApplication(argv)
     app.setApplicationName(APP_NAME)
 
