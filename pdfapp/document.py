@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import pypdfium2 as pdfium
 
-from .pagelist import PageList
+from .pagelist import PageList, PageRef
 from .transform import PageTransform, normalize_rotation
 
 
@@ -19,42 +20,60 @@ class DocumentError(Exception):
     """The file could not be opened as a PDF."""
 
 
+@dataclass(frozen=True)
+class SourceInfo:
+    """What the writer needs to reopen a source file with pikepdf."""
+
+    path: Path
+    password: Optional[str]
+
+
+@dataclass
+class _Source:
+    info: SourceInfo
+    pdf: pdfium.PdfDocument
+    page_count: int
+    has_forms: bool
+    page_cache: dict = field(default_factory=dict)  # source index -> PdfPage
+
+
+def _open_source(path: Path, password: Optional[str]) -> _Source:
+    try:
+        pdf = pdfium.PdfDocument(str(path), password=password)
+        # Touch the page count so a bad password fails here, not later.
+        count = len(pdf)
+    except pdfium.PdfiumError as exc:
+        if "password" in str(exc).lower():
+            raise PasswordRequired(str(exc)) from exc
+        raise DocumentError(f"could not open {path.name}: {exc}") from exc
+
+    # Form fields only render if the form environment is initialised.
+    try:
+        has_forms = pdf.get_formtype() != 0
+        if has_forms:
+            pdf.init_forms()
+    except Exception:
+        has_forms = False
+    return _Source(SourceInfo(path, password), pdf, count, has_forms)
+
+
 class PdfDocument:
-    """Read-only view of a PDF for rendering and measurement.
+    """Read-only view of one or more PDFs for rendering and measurement.
 
     This class exists purely to answer "how big is page N and what does it
     look like at scale S". Page operations don't mutate anything: `pages` maps
-    each displayed index to a source page plus extra rotation, and every
-    public method here takes a *displayed* index. Writing the edits out is
+    each displayed index to a (file, page, extra rotation), and every public
+    method here takes a *displayed* index. Writing the edits out is
     writer.py's job, via pikepdf.
+
+    File 0 is the document that was opened. Inserting pages from another PDF
+    opens it as an additional source; sources are only ever added, so any
+    PageList in the undo history stays resolvable.
     """
 
     def __init__(self, path: str | Path, password: Optional[str] = None):
-        self.path = Path(path)
-        self.password = password
-        try:
-            self._pdf = pdfium.PdfDocument(str(self.path), password=password)
-            # Touch the page count so a bad password fails here, not later.
-            _ = len(self._pdf)
-        except pdfium.PdfiumError as exc:
-            msg = str(exc).lower()
-            if "password" in msg:
-                raise PasswordRequired(str(exc)) from exc
-            raise DocumentError(f"could not open {self.path.name}: {exc}") from exc
-
-        # Form fields only render if the form environment is initialised.
-        try:
-            if self._pdf.get_formtype() != 0:
-                self._pdf.init_forms()
-                self._has_forms = True
-            else:
-                self._has_forms = False
-        except Exception:
-            self._has_forms = False
-
-        self._page_cache: dict[int, pdfium.PdfPage] = {}  # keyed by SOURCE index
-        self._source_count = len(self._pdf)
-        self._pages = PageList.identity(self._source_count)
+        self._sources: List[_Source] = [_open_source(Path(path), password)]
+        self._pages = PageList.identity(self._sources[0].page_count)
         self._closed = False
 
     # ---- lifecycle -----------------------------------------------------
@@ -63,17 +82,48 @@ class PdfDocument:
         if self._closed:
             return
         self._closed = True
-        self._page_cache.clear()
-        try:
-            self._pdf.close()
-        except Exception:
-            pass
+        for source in self._sources:
+            source.page_cache.clear()
+            try:
+                source.pdf.close()
+            except Exception:
+                pass
 
     def __enter__(self) -> "PdfDocument":
         return self
 
     def __exit__(self, *exc) -> None:
         self.close()
+
+    # ---- sources -------------------------------------------------------
+
+    @property
+    def path(self) -> Path:
+        return self._sources[0].info.path
+
+    @property
+    def password(self) -> Optional[str]:
+        return self._sources[0].info.password
+
+    @property
+    def sources(self) -> List[SourceInfo]:
+        return [s.info for s in self._sources]
+
+    def add_source(self, path: str | Path, password: Optional[str] = None) -> int:
+        """Open another PDF to take pages from. Returns its file index.
+
+        Always a new index, even for a file that's already a source (including
+        this document itself): each (file, page) appears at most once in a
+        PageList, so inserting the same file twice needs two identities.
+        """
+        if self._closed:
+            raise DocumentError("document is closed")
+        self._sources.append(_open_source(Path(path), password))
+        return len(self._sources) - 1
+
+    def source_refs(self, file: int) -> List[PageRef]:
+        """One PageRef per page of source `file`, in file order."""
+        return [PageRef(i, 0, file) for i in range(self._sources[file].page_count)]
 
     # ---- structure -----------------------------------------------------
 
@@ -83,7 +133,8 @@ class PdfDocument:
 
     @property
     def source_page_count(self) -> int:
-        return self._source_count
+        """Pages in the opened file (file 0)."""
+        return self._sources[0].page_count
 
     @property
     def pages(self) -> PageList:
@@ -94,30 +145,36 @@ class PdfDocument:
         if len(pages) == 0:
             raise ValueError("a document needs at least one page")
         for ref in pages:
-            if not 0 <= ref.source < self._source_count:
-                raise IndexError(f"source page {ref.source} not in this file")
+            if not 0 <= ref.file < len(self._sources):
+                raise IndexError(f"source file {ref.file} is not open")
+            if not 0 <= ref.source < self._sources[ref.file].page_count:
+                raise IndexError(f"page {ref.source} not in {self._sources[ref.file].info.path.name}")
         self._pages = pages
 
     @property
     def has_forms(self) -> bool:
-        return self._has_forms
+        return any(s.has_forms for s in self._sources)
 
     @property
     def title(self) -> str:
         try:
-            meta = self._pdf.get_metadata_dict()
+            meta = self._sources[0].pdf.get_metadata_dict()
             return (meta.get("Title") or "").strip() or self.path.name
         except Exception:
             return self.path.name
 
+    def _source(self, index: int) -> _Source:
+        return self._sources[self._pages[index].file]
+
     def _page(self, index: int) -> pdfium.PdfPage:
         if not 0 <= index < self.page_count:
             raise IndexError(f"page {index} out of range (0..{self.page_count - 1})")
-        source = self._pages[index].source
-        page = self._page_cache.get(source)
+        ref = self._pages[index]
+        source = self._sources[ref.file]
+        page = source.page_cache.get(ref.source)
         if page is None:
-            page = self._pdf[source]
-            self._page_cache[source] = page
+            page = source.pdf[ref.source]
+            source.page_cache[ref.source] = page
         return page
 
     def page_box(self, index: int) -> Tuple[float, float, float, float]:
@@ -192,6 +249,6 @@ class PdfDocument:
         return page.render(
             scale=scale,
             rotation=(self._pages[index].rotation + view_rotation) % 360,
-            may_draw_forms=self._has_forms,
+            may_draw_forms=self._source(index).has_forms,
             prefer_bgrx=True,  # 32-bit aligned rows blit faster into Qt
         )

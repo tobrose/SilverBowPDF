@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .document import DocumentError, PasswordRequired, PdfDocument
+from .document import DocumentError, PasswordRequired, PdfDocument, SourceInfo
 from .pagelist import History, PageList
 from .pageview import FitMode, PdfView
 from .thumbnails import ThumbnailSidebar
@@ -70,6 +70,7 @@ class MainWindow(QMainWindow):
         self.sidebar.move_requested.connect(self._on_drop)
         self.sidebar.delete_requested.connect(self.delete_pages)
         self.sidebar.context_requested.connect(self._pages_menu)
+        self.sidebar.files_dropped.connect(self.insert_files)
 
         self._building_ui = True
         self._build_actions()
@@ -137,6 +138,9 @@ class MainWindow(QMainWindow):
         self.act_page_delete = QAction("&Delete Pages", self,
                                        shortcut=QKeySequence("Ctrl+Shift+D"),
                                        triggered=lambda: self.delete_pages(sel()))
+        self.act_page_insert = QAction("&Insert Pages from File…", self,
+                                       shortcut=QKeySequence("Ctrl+Shift+I"),
+                                       triggered=lambda: self.insert_dialog())
         self.act_page_extract = QAction("E&xtract Pages…", self,
                                         shortcut=QKeySequence("Ctrl+Shift+E"),
                                         triggered=lambda: self.extract_pages(sel()))
@@ -227,6 +231,7 @@ class MainWindow(QMainWindow):
         pages_menu.addAction(self.act_page_up)
         pages_menu.addAction(self.act_page_down)
         pages_menu.addSeparator()
+        pages_menu.addAction(self.act_page_insert)
         pages_menu.addAction(self.act_page_extract)
         pages_menu.addSeparator()
         pages_menu.addAction(self.act_page_delete)
@@ -246,7 +251,7 @@ class MainWindow(QMainWindow):
                     self.act_zoom_100, self.act_fit_width, self.act_fit_page,
                     self.act_rotate_ccw, self.act_rotate_cw, self.act_page_rot_ccw,
                     self.act_page_rot_cw, self.act_page_up, self.act_page_down,
-                    self.act_page_delete, self.act_page_extract, self.act_next,
+                    self.act_page_delete, self.act_page_extract, self.act_page_insert, self.act_next,
                     self.act_prev, self.act_first,
                     self.act_last, self.act_goto):
             act.setEnabled(enabled)
@@ -266,26 +271,30 @@ class MainWindow(QMainWindow):
     def open_path(self, path: str | Path) -> None:
         if not self._confirm_discard():
             return
-        path = Path(path)
+        document = self._with_password(Path(path), lambda pw: PdfDocument(path, password=pw))
+        if document is not None:
+            self.view.set_document(document)
+
+    def _with_password(self, path: Path, opener):
+        """Call opener(password), prompting until it works or the user gives up.
+
+        Returns opener's result, or None if cancelled or unreadable (already
+        reported to the user).
+        """
         password: Optional[str] = None
         while True:
             try:
-                document = PdfDocument(path, password=password)
-                break
+                return opener(password)
             except PasswordRequired:
+                prompt = (f"{path.name} is encrypted.\nEnter the password:" if password is None
+                          else f"That password didn't work for {path.name}.\nTry again:")
                 password, ok = QInputDialog.getText(
-                    self,
-                    "Password required",
-                    f"{path.name} is encrypted.\nEnter the password:",
-                    QLineEdit.Password,
-                )
+                    self, "Password required", prompt, QLineEdit.Password)
                 if not ok:
-                    return
+                    return None
             except DocumentError as exc:
                 QMessageBox.critical(self, "Could not open file", str(exc))
-                return
-
-        self.view.set_document(document)
+                return None
 
     def close_document(self) -> None:
         if self._confirm_discard():
@@ -419,11 +428,57 @@ class MainWindow(QMainWindow):
         menu.addAction("Move Later", lambda: self.move_pages_by(indices, +1)).setEnabled(
             min(indices) + len(indices) < n)
         menu.addSeparator()
+        menu.addAction("Insert Pages from File…",
+                       lambda: self.insert_dialog(max(indices) + 1))
         menu.addAction(f"Extract {what}…", lambda: self.extract_pages(indices))
         menu.addSeparator()
         menu.addAction(f"Delete {what}",
                        lambda: self.delete_pages(indices)).setEnabled(len(indices) < n)
         menu.exec(global_pos)
+
+    # ---- insert --------------------------------------------------------
+
+    def _insert_position(self) -> int:
+        """After the last selected page, else after the current page."""
+        doc = self.view.document
+        if doc is None:
+            return 0
+        return max(self._targets()) + 1
+
+    def insert_dialog(self, at: Optional[int] = None) -> None:
+        if self.view.document is None:
+            return
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Insert Pages from PDF", str(self.view.document.path.parent),
+            "PDF documents (*.pdf)")
+        if paths:
+            self.insert_files([Path(p) for p in paths],
+                              self._insert_position() if at is None else at)
+
+    def insert_files(self, paths: list[Path], at: int) -> bool:
+        """Insert every page of each file, in order, starting at position `at`."""
+        doc = self.view.document
+        if doc is None or not paths:
+            return False
+        pages = doc.pages
+        inserted: list[str] = []
+        start = at = max(0, min(doc.page_count, at))
+        for path in paths:
+            file = self._with_password(path, lambda pw, p=path: doc.add_source(p, pw))
+            if file is None:
+                continue  # cancelled or unreadable; already reported
+            refs = doc.source_refs(file)
+            pages = pages.inserted(refs, at)
+            at += len(refs)
+            inserted.append(path.name)
+        if not inserted:
+            return False
+        count = at - start
+        noun = "Page" if count == 1 else f"{count} Pages"
+        label = (f"Insert {noun} from {inserted[0]}" if len(inserted) == 1
+                 else f"Insert {noun} from {len(inserted)} Files")
+        self._edit(pages, label, start, list(range(start, at)))
+        return True
 
     # ---- extract -------------------------------------------------------
 
@@ -447,14 +502,9 @@ class MainWindow(QMainWindow):
             return False
         indices = sorted(indices)
         suggested = doc.path.with_name(self._extract_name(doc.path.stem, indices))
-        dest, _ = QFileDialog.getSaveFileName(
-            self, f"Extract {self._describe(indices)}", str(suggested), "PDF documents (*.pdf)"
-        )
-        if not dest:
+        dest = self._ask_save_path(f"Extract {self._describe(indices)}", suggested)
+        if dest is None:
             return False
-        dest = Path(dest)
-        if dest.suffix.lower() != ".pdf":
-            dest = dest.with_name(dest.name + ".pdf")
         if self._same_file(dest, doc.path):
             QMessageBox.warning(
                 self, "Choose a different file",
@@ -463,75 +513,47 @@ class MainWindow(QMainWindow):
                 f"To keep only these pages, delete the others and save instead.",
             )
             return False
+        if any(self._same_file(dest, s.path) for s in doc.sources):
+            QMessageBox.warning(
+                self, "Choose a different file",
+                f"{dest.name} is a file you inserted pages from, and it's still in "
+                f"use by this document. Choose a different name.",
+            )
+            return False
 
-        pages = PageList(doc.pages[i] for i in indices)
-        allow_decrypt = False
-        while True:
-            try:
-                tmp = write_pdf(doc.path, doc.password, pages, dest,
-                                allow_decrypt=allow_decrypt)
-                commit(tmp, dest)
-                break
-            except EncryptionWouldBeLost:
-                if not self._confirm_unprotected_copy(doc.path, dest):
-                    return False
-                allow_decrypt = True
-            except Exception as exc:  # nothing we wrote survives a failure
-                QMessageBox.critical(self, "Extract failed",
-                                     f"Could not write {dest.name}:\n\n{exc}")
-                return False
-
+        written = self._write(PageList(doc.pages[i] for i in indices), dest, "Extract failed")
+        if written is None:
+            return False
+        try:
+            commit(written[0], dest)
+        except SaveError as exc:
+            QMessageBox.critical(self, "Extract failed", str(exc))
+            return False
         self.statusBar().showMessage(
             f"Extracted {self._describe(indices).lower()} to {dest}", 8000)
         return True
-
-    def _confirm_unprotected_copy(self, source: Path, dest: Path) -> bool:
-        answer = QMessageBox.warning(
-            self, "Save unprotected copy?",
-            f"{source.name} is password-protected. The copy saved as "
-            f"{dest.name} will NOT have a password — anyone who gets the "
-            f"file can open it.\n\nThe original stays protected.",
-            QMessageBox.Save | QMessageBox.Cancel, QMessageBox.Cancel,
-        )
-        return answer == QMessageBox.Save
 
     # ---- saving --------------------------------------------------------
 
     def save(self) -> bool:
         doc = self.view.document
-        if doc is None:
-            return False
-        try:
-            return self._save_to(doc.path, allow_decrypt=False)
-        except EncryptionWouldBeLost:
-            QMessageBox.warning(
-                self, "Can't save over a protected file",
-                f"{doc.path.name} is password-protected, and saving changes would "
-                f"remove the password. {APP_NAME} can't re-apply encryption yet.\n\n"
-                f"Use Save As to write an unprotected copy under a different name.",
-            )
-            return False
+        return doc is not None and self._save_to(doc.path)
 
     def save_as(self) -> bool:
         doc = self.view.document
         if doc is None:
             return False
-        dest, _ = QFileDialog.getSaveFileName(
-            self, "Save PDF As", str(doc.path), "PDF documents (*.pdf)"
-        )
+        dest = self._ask_save_path("Save PDF As", doc.path)
+        return dest is not None and self._save_to(dest)
+
+    def _ask_save_path(self, title: str, suggested: Path) -> Optional[Path]:
+        dest, _ = QFileDialog.getSaveFileName(self, title, str(suggested), "PDF documents (*.pdf)")
         if not dest:
-            return False
+            return None
         dest = Path(dest)
         if dest.suffix.lower() != ".pdf":
             dest = dest.with_name(dest.name + ".pdf")
-        try:
-            return self._save_to(dest, allow_decrypt=False)
-        except EncryptionWouldBeLost:
-            if self._same_file(dest, doc.path):
-                return self.save()  # explains; never overwrite the protected original
-            if not self._confirm_unprotected_copy(doc.path, dest):
-                return False
-            return self._save_to(dest, allow_decrypt=True)
+        return dest
 
     @staticmethod
     def _same_file(a: Path, b: Path) -> bool:
@@ -540,35 +562,76 @@ class MainWindow(QMainWindow):
         except OSError:
             return False
 
-    def _save_to(self, dest: Path, allow_decrypt: bool) -> bool:
-        """Write, swap in, reopen. Lets EncryptionWouldBeLost through to the caller."""
+    def _write(self, pages: PageList, dest: Path,
+               failure_title: str) -> Optional[tuple[Path, set[int]]]:
+        """write_pdf, asking once per password-protected source whether it's OK
+        for its pages to come out unprotected. Returns the temp file and the
+        sources the user let lose protection, or None if the user declined or
+        it failed (already reported)."""
+        doc = self.view.document
+        allowed: set[int] = set()
+        while True:
+            try:
+                return write_pdf(doc.sources, pages, dest, allow_decrypt=allowed), allowed
+            except EncryptionWouldBeLost as exc:
+                if exc.file == 0 and self._same_file(dest, doc.path):
+                    QMessageBox.warning(
+                        self, "Can't save over a protected file",
+                        f"{doc.path.name} is password-protected, and saving changes "
+                        f"would remove the password. {APP_NAME} can't re-apply "
+                        f"encryption yet.\n\nUse Save As to write an unprotected copy "
+                        f"under a different name.",
+                    )
+                    return None
+                if not self._confirm_unprotected_copy(exc.path, dest, inserted=exc.file != 0):
+                    return None
+                allowed.add(exc.file)
+            except Exception as exc:  # nothing on disk has changed
+                QMessageBox.critical(self, failure_title,
+                                     f"Could not write {dest.name}:\n\n{exc}")
+                return None
+
+    def _confirm_unprotected_copy(self, source: Path, dest: Path, inserted: bool) -> bool:
+        what = (f"Pages you inserted from {source.name} are password-protected in that "
+                f"file. In {dest.name} they will NOT be" if inserted else
+                f"{source.name} is password-protected. The copy saved as {dest.name} "
+                f"will NOT have a password")
+        answer = QMessageBox.warning(
+            self, "Save unprotected copy?",
+            f"{what} — anyone who gets the file can open it.\n\n"
+            f"{source.name} itself stays protected.",
+            QMessageBox.Save | QMessageBox.Cancel, QMessageBox.Cancel,
+        )
+        return answer == QMessageBox.Save
+
+    def _save_to(self, dest: Path) -> bool:
+        """Write, swap in, reopen."""
         doc = self.view.document
         pages = doc.pages
-        try:
-            tmp = write_pdf(doc.path, doc.password, pages, dest, allow_decrypt=allow_decrypt)
-        except EncryptionWouldBeLost:
-            raise
-        except Exception as exc:  # nothing on disk has changed
-            QMessageBox.critical(self, "Save failed", f"Could not save {dest.name}:\n\n{exc}")
+        written = self._write(pages, dest, "Save failed")
+        if written is None:
             return False
+        tmp, allowed = written
 
-        # pdfium holds its file open and Windows won't replace an open file,
-        # so release it -- but only when it's the file being overwritten.
-        overwriting = self._same_file(dest, doc.path)
+        # pdfium holds every source open and Windows won't replace an open
+        # file, so release them -- but only when one of them is the target.
+        sources = doc.sources
+        overwriting = any(self._same_file(dest, s.path) for s in sources)
         if overwriting:
             doc.close()
         try:
             commit(tmp, dest)
         except SaveError as exc:
             if overwriting:
-                self._reopen(doc.path, doc.password, keep_edits=pages)
+                self._reopen(sources, keep_edits=pages)
             QMessageBox.critical(self, "Save failed", f"{exc}\n\nThe original file is unchanged.")
             return False
 
         # The saved file is the new baseline, with the edits baked in. The undo
-        # history refers to the old file's page numbers, so it starts over.
+        # history refers to the old files' page numbers, so it starts over.
+        password = None if 0 in allowed else doc.password
         try:
-            self._reopen(dest, None if allow_decrypt else doc.password)
+            self._reopen([SourceInfo(dest, password)])
         except Exception as exc:
             self.view.set_document(None)
             QMessageBox.critical(
@@ -579,11 +642,17 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Saved {dest}", 5000)
         return True
 
-    def _reopen(self, path: Path, password: Optional[str],
+    def _reopen(self, sources: list[SourceInfo],
                 keep_edits: Optional[PageList] = None) -> None:
-        document = PdfDocument(path, password=password)
-        if keep_edits is not None:
-            document.pages = keep_edits
+        document = PdfDocument(sources[0].path, password=sources[0].password)
+        try:
+            for source in sources[1:]:
+                document.add_source(source.path, source.password)
+            if keep_edits is not None:
+                document.pages = keep_edits
+        except Exception:
+            document.close()
+            raise
         self._keep_history = keep_edits is not None
         try:
             self.view.set_document(document, keep_view=True)

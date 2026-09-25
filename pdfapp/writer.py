@@ -6,7 +6,7 @@ their own terms.
 
 Saving is two steps so the caller can release its own handle in between:
 
-    tmp = write_pdf(source, password, pages, dest)   # original untouched
+    tmp = write_pdf(sources, pages, dest)            # originals untouched
     <close anything that holds `dest` open -- Windows won't replace it otherwise>
     commit(tmp, dest)                                # atomic swap
 
@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import os
 import tempfile
+import warnings
+from contextlib import ExitStack
 from pathlib import Path
-from typing import Optional
+from typing import Collection, Dict, List, Optional, Protocol, Sequence, Tuple
 
 import pikepdf
 
@@ -31,71 +33,129 @@ class SaveError(Exception):
 
 
 class EncryptionWouldBeLost(SaveError):
-    """The source is encrypted and saving would silently strip that.
+    """A source is encrypted and saving would silently strip that.
 
     pikepdf's default save drops encryption (checked against pikepdf 10: a
     file opened with its user password saves back out with no password at
-    all). Re-encrypting properly needs the owner password and permissions,
-    which is the encryption milestone. Until then the caller must opt in to
-    writing an unprotected copy, knowingly.
+    all), and pages copied out of a protected file into another document
+    carry no protection with them. Re-encrypting properly needs the owner
+    password and permissions, which is the encryption milestone. Until then
+    the caller must opt in per source file, knowingly.
     """
+
+    def __init__(self, file: int, path: Path):
+        self.file = file
+        self.path = path
+        super().__init__(
+            f"{path.name} is password-protected, and saving would remove the protection."
+        )
+
+
+class Source(Protocol):
+    path: Path
+    password: Optional[str]
 
 
 def write_pdf(
-    source: str | Path,
-    password: Optional[str],
+    sources: Sequence[Source],
     pages: PageList,
     dest: str | Path,
-    allow_decrypt: bool = False,
+    allow_decrypt: Collection[int] = (),
 ) -> Path:
-    """Build the edited PDF into a temp file beside `dest` and return its path."""
-    source, dest = Path(source), Path(dest)
+    """Build the edited PDF into a temp file beside `dest` and return its path.
+
+    sources[0] is the base document: its catalog -- metadata, bookmarks, form
+    definitions -- is what gets written. Pages from other sources are copied
+    in, bringing their form fields, the named destinations their links use,
+    and their bookmarks (under a folder named after the file).
+
+    allow_decrypt: indices of encrypted sources the user agreed to write out
+    unprotected. Any other encrypted source raises EncryptionWouldBeLost.
+    """
+    dest = Path(dest)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{dest.stem}.", suffix=".tmp", dir=dest.parent)
     os.close(fd)
     tmp = Path(tmp_name)
+    used = sorted({r.file for r in pages} | {0})
     try:
-        with pikepdf.open(source, password=password or "") as pdf:
-            if pdf.is_encrypted and not allow_decrypt:
-                raise EncryptionWouldBeLost(
-                    f"{source.name} is password-protected, and saving would remove "
-                    f"the protection."
-                )
-            if len(pdf.pages) <= max(r.source for r in pages):
-                raise SaveError(
-                    f"{source.name} has {len(pdf.pages)} pages on disk but the edit "
-                    f"refers to page {max(r.source for r in pages) + 1}. Was the file "
-                    f"changed by another program?"
-                )
+        with ExitStack() as stack:
+            pdfs: Dict[int, pikepdf.Pdf] = {}
+            for f in used:
+                src = sources[f]
+                pdf = stack.enter_context(pikepdf.open(src.path, password=src.password or ""))
+                if pdf.is_encrypted and f not in allow_decrypt:
+                    raise EncryptionWouldBeLost(f, Path(src.path))
+                highest = max((r.source for r in pages if r.file == f), default=-1)
+                if len(pdf.pages) <= highest:
+                    raise SaveError(
+                        f"{Path(src.path).name} has {len(pdf.pages)} pages on disk but "
+                        f"the edit refers to page {highest + 1}. Was the file changed "
+                        f"by another program?"
+                    )
+                pdfs[f] = pdf
+            base = pdfs[0]
 
-            # Reorder in place rather than copying into a fresh Pdf, so the
-            # document catalog -- outlines, form definitions, metadata -- comes
-            # along.
+            # Every page object the result will contain, keyed by (file, page).
             #
-            # The pages must stay the SAME objects, because bookmarks, links
-            # and form fields point at them by object number. Slice assignment,
-            # insert and reverse all silently copy a page that's already in
-            # the tree (checked, pikepdf 10), leaving every reference aimed at
-            # a stale original. Emptying the tree first and appending the same
-            # Page objects back keeps their identity. qpdf flattens the page
-            # tree on removal, pushing inherited /Resources, /MediaBox,
-            # /CropBox and /Rotate down onto each page, so nothing is lost
-            # when their old parent node goes away.
-            new_pages = [pdf.pages[r.source] for r in pages]
-            while len(pdf.pages):
-                del pdf.pages[-1]
-            for page in new_pages:
-                pdf.pages.append(page)
-            if [p.obj.objgen for p in pdf.pages] != [p.obj.objgen for p in new_pages]:
+            # They must be the SAME objects throughout, because bookmarks,
+            # links and form fields point at them by object number. Slice
+            # assignment, insert and reverse all silently copy a page that's
+            # already in the tree (checked, pikepdf 10), leaving every
+            # reference aimed at a stale original. Emptying the tree and
+            # appending the same Page objects back keeps their identity. qpdf
+            # flattens the page tree on removal, pushing inherited /Resources,
+            # /MediaBox, /CropBox and /Rotate down onto each page, so nothing
+            # is lost when their old parent node goes away.
+            placed: Dict[Tuple[int, int], pikepdf.Page] = {
+                (0, r.source): base.pages[r.source] for r in pages if r.file == 0
+            }
+            while len(base.pages):
+                del base.pages[-1]
+
+            # Foreign pages. Plain append, not add_pages_from: the latter copies
+            # form fields page by page, so a field with widgets on two copied
+            # pages becomes two unrelated fields that no longer share a value
+            # (checked, pikepdf 10). qpdf's own copier remembers everything it
+            # has copied from a given file, so appending all of a file's pages
+            # keeps shared fields shared -- and turns references to pages it
+            # didn't copy into null instead of dragging those pages along.
+            foreign_origin: Dict[Tuple[int, int], Tuple[int, Tuple[int, int]]] = {}
+            with warnings.catch_warnings():
+                # "widgets not reachable from /AcroForm": _merge_forms fixes that.
+                warnings.simplefilter("ignore", pikepdf.PageCopyWarning)
+                for f in used:
+                    if f == 0:
+                        continue
+                    for r in pages:
+                        if r.file != f:
+                            continue
+                        original = pdfs[f].pages[r.source]
+                        base.pages.append(original)
+                        page = base.pages[-1]
+                        placed[(f, r.source)] = page
+                        foreign_origin[page.obj.objgen] = (f, original.obj.objgen)
+                    copied = [placed[(f, r.source)] for r in pages if r.file == f]
+                    _merge_forms(base, pdfs[f], copied)
+                    _resolve_named_links(base, pdfs[f], f, copied, foreign_origin)
+            while len(base.pages):
+                del base.pages[-1]
+
+            expected = [placed[(r.file, r.source)] for r in pages]
+            for page in expected:
+                base.pages.append(page)
+            if [p.obj.objgen for p in base.pages] != [p.obj.objgen for p in expected]:
                 raise SaveError("page reorder did not preserve page identity")
-            for page, ref in zip(pdf.pages, pages):
+            for page, ref in zip(base.pages, pages):
                 if ref.rotation:
                     page.rotate(ref.rotation, relative=True)
 
+            _import_outlines(base, pdfs, sources, foreign_origin)
+
             # Always, not just after deletes: with every page kept it finds
             # nothing, and one code path is one thing to get right.
-            prune_dangling(pdf)
+            prune_dangling(base)
 
-            pdf.save(tmp)
+            base.save(tmp)
 
         # Reopen and count before letting the caller replace anything.
         with pikepdf.open(tmp) as check:
@@ -107,6 +167,173 @@ def write_pdf(
         tmp.unlink(missing_ok=True)
         raise
     return tmp
+
+
+def _merge_forms(base: pikepdf.Pdf, src: pikepdf.Pdf, copied: List[pikepdf.Page]) -> None:
+    """Register form fields that arrived on copied pages with base's AcroForm.
+
+    A top-level field whose name is already taken is renamed "name+1",
+    "name+2"... -- same-named fields in one document share a value, which
+    would silently tie together two unrelated forms.
+    """
+    tops: List[pikepdf.Dictionary] = []
+    seen = set()
+    for page in copied:
+        for annot in page.obj.get("/Annots") or []:
+            if not isinstance(annot, pikepdf.Dictionary) \
+                    or annot.get("/Subtype") != pikepdf.Name.Widget:
+                continue
+            top, hops = annot, 0
+            while isinstance(top.get("/Parent"), pikepdf.Dictionary) and hops < 64:
+                top, hops = top.Parent, hops + 1
+            if top.objgen not in seen:
+                seen.add(top.objgen)
+                tops.append(top)
+    if not tops:
+        return
+
+    form = base.Root.get("/AcroForm")
+    if not isinstance(form, pikepdf.Dictionary):
+        form = base.Root.AcroForm = base.make_indirect(pikepdf.Dictionary(Fields=pikepdf.Array()))
+    if "/Fields" not in form:
+        form.Fields = pikepdf.Array()
+
+    taken = {str(f.get("/T", "")) for f in form.Fields if isinstance(f, pikepdf.Dictionary)}
+    for top in tops:
+        name = str(top.get("/T", ""))
+        if name and name in taken:
+            n = 1
+            while f"{name}+{n}" in taken:
+                n += 1
+            name = f"{name}+{n}"
+            top.T = pikepdf.String(name)
+        taken.add(name)
+        form.Fields.append(top)
+
+    # Fonts and defaults the copied fields' appearances refer to by name.
+    src_form = src.Root.get("/AcroForm")
+    if isinstance(src_form, pikepdf.Dictionary):
+        if src_form.get("/NeedAppearances"):
+            form.NeedAppearances = True
+        if "/DA" in src_form and "/DA" not in form:
+            form.DA = src_form.DA
+        src_fonts = src_form.get("/DR", {}).get("/Font") if "/DR" in src_form else None
+        if isinstance(src_fonts, pikepdf.Dictionary):
+            if "/DR" not in form:
+                form.DR = pikepdf.Dictionary()
+            if "/Font" not in form.DR:
+                form.DR.Font = pikepdf.Dictionary()
+            for key, font in src_fonts.items():
+                if key not in form.DR.Font:
+                    form.DR.Font[key] = base.copy_foreign(font)
+
+
+def _resolve_named_links(
+    base: pikepdf.Pdf,
+    src: pikepdf.Pdf,
+    f: int,
+    copied: List[pikepdf.Page],
+    foreign_origin: Dict[Tuple[int, int], Tuple[int, Tuple[int, int]]],
+) -> None:
+    """Rewrite links on copied pages that jump by *name* into explicit targets.
+
+    The name means something in the source file's name table, not base's --
+    left alone it would resolve against base's destinations, possibly to a
+    same-named one on the wrong page. Names that resolve to a copied page
+    become explicit; anything else is nulled, and prune_dangling drops it.
+    """
+    named = _named_destinations(src)
+    to_copy = {origin: base_objgen for base_objgen, (ff, origin) in foreign_origin.items()
+               if ff == f}
+    by_objgen = {p.obj.objgen: p.obj for p in copied}
+
+    def explicit(dest):
+        if not isinstance(dest, (pikepdf.Name, pikepdf.String)):
+            return dest
+        target = named.get(str(dest))
+        if isinstance(target, pikepdf.Dictionary) and "/D" in target:
+            target = target.D
+        if isinstance(target, pikepdf.Array) and len(target) > 0 \
+                and isinstance(target[0], pikepdf.Dictionary):
+            page = by_objgen.get(to_copy.get(target[0].objgen))
+            if page is not None:
+                return pikepdf.Array([page] + [base.copy_foreign(target[i])
+                                               for i in range(1, len(target))])
+        return pikepdf.Array([None])
+
+    for page in copied:
+        for annot in page.obj.get("/Annots") or []:
+            if not isinstance(annot, pikepdf.Dictionary) \
+                    or annot.get("/Subtype") != pikepdf.Name.Link:
+                continue
+            if "/Dest" in annot:
+                annot.Dest = explicit(annot.Dest)
+            action = annot.get("/A")
+            if isinstance(action, pikepdf.Dictionary) and action.get("/S") == pikepdf.Name.GoTo:
+                action.D = explicit(action.D)
+
+
+def _import_outlines(
+    base: pikepdf.Pdf,
+    pdfs: Dict[int, pikepdf.Pdf],
+    sources: Sequence[Source],
+    foreign_origin: Dict[Tuple[int, int], Tuple[int, int]],
+) -> None:
+    """Bring each inserted file's bookmarks across, under a folder per file.
+
+    Only bookmarks that land on a copied page (or are folders holding such
+    bookmarks) come along; their destinations are rewritten to the copies.
+    Anything that doesn't resolve to a copied page is dropped rather than
+    copied, since copying would drag the uncopied page into the file.
+    """
+    # (file, original page objgen) -> copied page object in base
+    copied: Dict[Tuple[int, Tuple[int, int]], pikepdf.Object] = {}
+    for page in base.pages:
+        origin = foreign_origin.get(page.obj.objgen)
+        if origin is not None:
+            copied[origin] = page.obj
+
+    for f, pdf in pdfs.items():
+        if f == 0 or "/Outlines" not in pdf.Root:
+            continue
+        named = _named_destinations(pdf)
+
+        def convert(item) -> Optional[pikepdf.OutlineItem]:
+            children = [c for c in (convert(ch) for ch in item.children) if c is not None]
+            dest = item.destination
+            if dest is None and isinstance(item.action, pikepdf.Dictionary) \
+                    and item.action.get("/S") == pikepdf.Name.GoTo:
+                dest = item.action.get("/D")
+            if isinstance(dest, (pikepdf.Name, pikepdf.String)):
+                dest = named.get(str(dest))
+            if isinstance(dest, pikepdf.Dictionary) and "/D" in dest:
+                dest = dest.D
+            new_dest = None
+            if isinstance(dest, pikepdf.Array) and len(dest) > 0 \
+                    and isinstance(dest[0], pikepdf.Dictionary) and dest[0].is_indirect:
+                target = copied.get((f, dest[0].objgen))
+                if target is not None:
+                    new_dest = pikepdf.Array([target] + [dest[i] for i in range(1, len(dest))])
+            if new_dest is None and not children:
+                return None
+            new = pikepdf.OutlineItem(str(item.title))
+            if new_dest is not None:
+                new.destination = new_dest
+            new.children.extend(children)
+            return new
+
+        with pdf.open_outline() as source_outline:
+            imported = [c for c in (convert(i) for i in source_outline.root) if c is not None]
+        if not imported:
+            continue
+        first_page = next(
+            (page for page in base.pages
+             if foreign_origin.get(page.obj.objgen, (None,))[0] == f), None)
+        folder = pikepdf.OutlineItem(Path(sources[f].path).name,
+                                     first_page.index if first_page is not None else 0)
+        folder.children.extend(imported)
+        with base.open_outline() as outline:
+            outline.root.append(folder)
 
 
 def prune_dangling(pdf: pikepdf.Pdf) -> None:
@@ -144,6 +371,10 @@ def prune_dangling(pdf: pikepdf.Pdf) -> None:
             page = dest[0]
             if isinstance(page, pikepdf.Dictionary) and page.is_indirect:
                 return page.objgen in kept
+            if page is None:
+                # qpdf nulls references to pages it didn't copy from another
+                # file, so a null target is a link to a page left behind.
+                return False
         return None
 
     def action_alive(action) -> Optional[bool]:

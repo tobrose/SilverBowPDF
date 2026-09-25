@@ -25,10 +25,13 @@ pytest                            # tests, if pytest is installed
 pdfapp/
   transform.py   PageTransform. All coordinate math. LOAD-BEARING.
   pagelist.py    PageList (page edits as data) + History (snapshot undo). No Qt/pdfium/pikepdf.
+                 PageRef = (file, page, rotation). File 0 is the opened document.
   document.py    pypdfium2 wrapper. NO Qt imports -- must stay headless-testable.
-                 Takes *displayed* indices; maps them through its PageList to source pages.
+                 Takes *displayed* indices; maps them through its PageList to a
+                 page of one of its sources. Sources are only ever added.
   writer.py      The only code that writes PDFs. pikepdf. write to temp -> commit (os.replace).
                  prune_dangling() drops bookmarks/links/fields/dests aimed at removed pages.
+                 Foreign pages: plain append + _merge_forms, NOT add_pages_from (see rule 6).
   rendering.py   pdfium bitmap -> QImage, plus an LRU page cache.
   pageview.py    Continuous scroll view, zoom, view rotation.
   thumbnails.py  Page sidebar: multi-select, drag-to-reorder, lazy thumbnails.
@@ -74,9 +77,11 @@ dev machine.
 warning or a resize.
 
 **5. Never silently drop encryption.** pikepdf's default save strips it
-(verified, pikepdf 10). `write_pdf` raises `EncryptionWouldBeLost` unless the
-caller passes `allow_decrypt=True` after the user explicitly agreed, and the
-protected original is never overwritten with an unprotected file.
+(verified, pikepdf 10), and pages inserted from a protected file carry no
+protection into another document. `write_pdf` raises `EncryptionWouldBeLost`
+(naming the source file) unless that file's index is in `allow_decrypt` after
+the user explicitly agreed, and a protected original is never overwritten with
+an unprotected file.
 
 **6. Never reorder pages with pikepdf's slice assignment, insert or reverse.**
 They silently COPY a page that's already in the tree, so every bookmark, link
@@ -84,6 +89,11 @@ and form field keeps pointing at the stale original, which then rides along in
 the file as dead weight. `write_pdf` empties the tree and appends the same Page
 objects back, and raises if object identity changed. `tests/test_pages.py`
 checks that no removed page object survives in a saved file.
+
+Likewise, don't copy pages in with `Pdf.add_pages_from`: it copies form fields
+page by page, so a field with widgets on two inserted pages becomes two
+unrelated fields. Appending all of one file's pages lets qpdf's copier keep
+them shared; `_merge_forms` then registers them with /AcroForm.
 
 **7. Never silently swallow a pdfium exception.** `PageWidget.paintEvent` draws
 the error onto the failed page so one corrupt page does not take down the
@@ -107,11 +117,11 @@ width/page, view rotation, navigation, form-field rendering, drag-and-drop,
 per-page error isolation. Page operations (rotate, delete, reorder) on
 the sidebar selection, with undo/redo, Save / Save As, and an unsaved-changes
 prompt. Thumbnail sidebar with multi-select and drag-to-reorder. Extract
-pages to a new file (split).
+pages to a new file (split). Insert pages from other PDFs (merge), from a
+menu or by dropping files on the sidebar, carrying their form fields and
+bookmarks (in a folder named after the file).
 
-Next, in order: insert pages from another PDF (merge -- PageRef needs a
-source file, which touches document, rendering, writer and undo), annotations,
-form filling, encryption, packaging.
+Next, in order: annotations, form filling, encryption, packaging.
 
 Deployment target is shared multi-session desktops: no GPU, non-persistent
 profiles, pixels re-encoded over a remote-display protocol. Keep memory and repaints lean; don't
@@ -121,6 +131,11 @@ count on per-user settings surviving logoff.
 
 - Save resets undo history. The saved file becomes the new source, and old
   PageList snapshots index into the previous file.
+- Every inserted file stays open (pdfium handle) until the document is
+  closed or saved, so Windows won't let other programs replace it meanwhile.
+- The mouse wheel doesn't scroll the sidebar while dragging files in from
+  Explorer (OS drag loop); edge autoscroll does. Reordering pages inside the
+  sidebar is unaffected -- it's a hand-rolled drag.
 - Removing pages doesn't rewrite the tagged-PDF structure tree or
   /PageLabels. Both are index/structure based; rewriting them wrong is worse
   than leaving them.

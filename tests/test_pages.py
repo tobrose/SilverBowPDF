@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pikepdf  # noqa: E402
 
-from pdfapp.document import PdfDocument  # noqa: E402
+from pdfapp.document import PdfDocument, SourceInfo  # noqa: E402
 from pdfapp.pagelist import History, PageList, PageRef  # noqa: E402
 from pdfapp.writer import EncryptionWouldBeLost, SaveError, commit, write_pdf  # noqa: E402
 
@@ -170,7 +170,7 @@ def test_saved_file_matches_preview():
         with PdfDocument(src) as doc:
             doc.pages = edits
             preview = [[_render(doc, i, vr) for vr in (0, 90)] for i in range(doc.page_count)]
-            commit(write_pdf(src, None, edits, out), out)
+            commit(write_pdf([SourceInfo(src, None)], edits, out), out)
 
         with PdfDocument(out) as saved:
             assert saved.page_count == len(edits)
@@ -182,7 +182,7 @@ def test_saved_file_matches_preview():
                     assert got[2] == preview[i][j][2], f"page {i} view {vr}: pixels differ"
 
         # Save-over-self, the ordinary Ctrl+S path.
-        commit(write_pdf(src, None, edits, src), src)
+        commit(write_pdf([SourceInfo(src, None)], edits, src), src)
         with PdfDocument(src) as doc:
             assert doc.page_count == len(edits)
 
@@ -245,7 +245,7 @@ def test_removed_pages_leave_nothing_behind():
         src, out = Path(tmp, "refs.pdf"), Path(tmp, "out.pdf")
         _make_referencing_pdf(src)
 
-        commit(write_pdf(src, None, PageList.identity(5).deleted([3]), out), out)
+        commit(write_pdf([SourceInfo(src, None)], PageList.identity(5).deleted([3]), out), out)
         assert _page_objects_in_file(out) == 4, "removed page still stored in the file"
 
         with pikepdf.open(out) as pdf:
@@ -279,7 +279,7 @@ def test_nothing_pruned_when_nothing_removed():
     with tempfile.TemporaryDirectory() as tmp:
         src, out = Path(tmp, "refs.pdf"), Path(tmp, "out.pdf")
         _make_referencing_pdf(src)
-        commit(write_pdf(src, None, PageList.identity(5).moved([4], 0), out), out)
+        commit(write_pdf([SourceInfo(src, None)], PageList.identity(5).moved([4], 0), out), out)
         with pikepdf.open(out) as pdf:
             with pdf.open_outline() as outline:
                 assert len(outline.root) == 7
@@ -314,9 +314,128 @@ def test_inherited_page_attributes_survive_reorder():
             assert doc.page_rotation(0) == 90, "fixture: page 1 should inherit /Rotate"
             doc.pages = edits
             preview = [_render(doc, i) for i in range(doc.page_count)]
-        commit(write_pdf(src, None, edits, out), out)
+        commit(write_pdf([SourceInfo(src, None)], edits, out), out)
         with PdfDocument(out) as saved:
             assert [_render(saved, i) for i in range(saved.page_count)] == preview
+
+
+def test_pagelist_insert():
+    p = PageList.identity(3)
+    ins = [PageRef(1, 0, 1), PageRef(0, 90, 1)]
+    assert list(p.inserted(ins, 1)) == [PageRef(0), *ins, PageRef(1), PageRef(2)]
+    assert list(p.inserted(ins, 99))[-2:] == ins
+    assert p.rotated([0], 90).inserted(ins, 0).rotated([1], 90)[1] == PageRef(0, 180, 1)
+    for bad in ([], [PageRef(2, 90)]):  # empty; page already present (any rotation)
+        try:
+            p.inserted(bad, 0)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"inserting {bad} should fail")
+
+
+def test_merged_file_matches_preview():
+    """Pages from three sources -- including the document inserted into
+    itself -- reordered, rotated and trimmed, then saved: pixel-identical."""
+    with tempfile.TemporaryDirectory() as tmp:
+        base, other, out = Path(tmp, "base.pdf"), Path(tmp, "other.pdf"), Path(tmp, "out.pdf")
+        _make_pdf(base)
+        _make_referencing_pdf(other)
+        with PdfDocument(base) as doc:
+            f_other = doc.add_source(other)
+            f_self = doc.add_source(base)
+            edits = (doc.pages
+                     .inserted([doc.source_refs(f_other)[i] for i in (3, 0)], 2)
+                     .inserted(doc.source_refs(f_self)[1:3], 0)
+                     .rotated([0, 4], 90)
+                     .deleted([len(PAGES) + 3]))
+            doc.pages = edits
+            preview = [_render(doc, i, vr) for i in range(doc.page_count) for vr in (0, 90)]
+            commit(write_pdf(doc.sources, edits, out), out)
+
+        with PdfDocument(out) as saved:
+            assert saved.page_count == len(edits)
+            got = [_render(saved, i, vr) for i in range(saved.page_count) for vr in (0, 90)]
+            for n, (a, b) in enumerate(zip(got, preview)):
+                assert a[:2] == b[:2], f"render {n}: size {a[:2]} vs preview {b[:2]}"
+                assert a[2] == b[2], f"render {n}: pixels differ"
+        assert _page_objects_in_file(out) == len(edits), "orphaned page objects"
+
+
+def test_merge_carries_forms_links_and_bookmarks():
+    with tempfile.TemporaryDirectory() as tmp:
+        base, other, out = Path(tmp, "base.pdf"), Path(tmp, "other.pdf"), Path(tmp, "out.pdf")
+        _make_referencing_pdf(base)
+        _make_referencing_pdf(other)   # same field names: must not collide
+        with PdfDocument(base) as doc:
+            f = doc.add_source(other)
+            # Pages 1 and 4 of other: the "shared" field has widgets on both,
+            # "only_on_4" on page 4. Page 1's links point at page 4 (copied)
+            # and page 2 (not copied).
+            edits = doc.pages.inserted([doc.source_refs(f)[0], doc.source_refs(f)[3]], 5)
+            commit(write_pdf(doc.sources, edits, out), out)
+
+        assert _page_objects_in_file(out) == 7, "an uncopied page came along"
+        with pikepdf.open(out) as pdf:
+            fields = {str(fld.T): fld for fld in pdf.Root.AcroForm.Fields}
+            assert sorted(fields) == ["only_on_4", "only_on_4+1", "shared", "shared+1"], sorted(fields)
+
+            kept = {pg.obj.objgen for pg in pdf.pages}
+            # The imported copy of "shared" is still ONE field whose widgets sit
+            # on both copied pages, so the two still share a value.
+            on = {pg.obj.objgen: i for i, pg in enumerate(pdf.pages)}
+            assert sorted(on[k.P.objgen] for k in fields["shared+1"].Kids) == [5, 6]
+            assert all(k.Parent.objgen == fields["shared+1"].objgen for k in fields["shared+1"].Kids)
+            copied_p1 = pdf.pages[5].obj
+            links = [a for a in copied_p1.Annots if a.Subtype == pikepdf.Name.Link]
+            assert len(links) == 1, "link to the uncopied page should be gone"
+            assert links[0].Dest[0].objgen == pdf.pages[6].obj.objgen, "link should follow its page"
+
+            with pdf.open_outline() as outline:
+                folder = outline.root[-1]
+                assert folder.title == "other.pdf", folder.title
+                titles = [(c.title, [g.title for g in c.children]) for c in folder.children]
+            assert titles == [
+                ("page 1", []), ("page 4", []),
+                ("folder -> page 4", ["child -> page 1", "child -> page 4"]),
+                ("named -> page 4", []),
+            ], titles
+            for node in _walk_outline(pdf.Root.Outlines.First):
+                if "/Dest" in node and isinstance(node.Dest, pikepdf.Array):
+                    assert node.Dest[0].objgen in kept, f"{node.Title} points outside the document"
+
+        with PdfDocument(out) as saved:  # pdfium is happy with the merged forms
+            assert saved.page_count == 7
+            _render(saved, 5)
+
+
+def _walk_outline(node):
+    seen = set()
+    while isinstance(node, pikepdf.Dictionary) and node.objgen not in seen:
+        seen.add(node.objgen)
+        yield node
+        yield from _walk_outline(node.get("/First"))
+        node = node.get("/Next")
+
+
+def test_inserting_from_protected_file_needs_consent():
+    with tempfile.TemporaryDirectory() as tmp:
+        base, prot, out = Path(tmp, "base.pdf"), Path(tmp, "prot.pdf"), Path(tmp, "out.pdf")
+        _make_pdf(base)
+        _make_pdf(prot, encryption=pikepdf.Encryption(user="u", owner="o"))
+        with PdfDocument(base) as doc:
+            f = doc.add_source(prot, "u")
+            edits = doc.pages.inserted(doc.source_refs(f)[:1], 0)
+            try:
+                write_pdf(doc.sources, edits, out)
+            except EncryptionWouldBeLost as exc:
+                assert exc.file == f and exc.path.name == "prot.pdf"
+            else:
+                raise AssertionError("protected pages saved without consent")
+            assert not out.exists()
+            commit(write_pdf(doc.sources, edits, out, allow_decrypt={f}), out)
+        with pikepdf.open(out) as pdf:
+            assert len(pdf.pages) == len(PAGES) + 1 and not pdf.is_encrypted
 
 
 def test_encrypted_source_is_not_silently_decrypted():
@@ -325,7 +444,7 @@ def test_encrypted_source_is_not_silently_decrypted():
         _make_pdf(src, encryption=pikepdf.Encryption(user="u", owner="o"))
         edits = PageList.identity(len(PAGES)).deleted([0])
         try:
-            write_pdf(src, "u", edits, out)
+            write_pdf([SourceInfo(src, "u")], edits, out)
         except EncryptionWouldBeLost:
             pass
         else:
@@ -333,7 +452,7 @@ def test_encrypted_source_is_not_silently_decrypted():
         assert not out.exists()
         assert not [p for p in Path(tmp).iterdir() if p.suffix == ".tmp"]
 
-        commit(write_pdf(src, "u", edits, out, allow_decrypt=True), out)
+        commit(write_pdf([SourceInfo(src, "u")], edits, out, allow_decrypt={0}), out)
         with PdfDocument(out) as doc:
             assert doc.page_count == len(PAGES) - 1
 
@@ -346,7 +465,7 @@ def test_failed_commit_leaves_original_intact():
         _make_pdf(src)
         original = src.read_bytes()
         edits = PageList.identity(len(PAGES)).deleted([0])
-        tmp_file = write_pdf(src, None, edits, src)
+        tmp_file = write_pdf([SourceInfo(src, None)], edits, src)
         holder = PdfDocument(src)  # pdfium holds the file open, as the app does
         _ = holder.page_box(0)
         try:

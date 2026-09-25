@@ -22,12 +22,17 @@ from .transform import normalize_rotation
 class PageRef:
     """One page of the edited document.
 
-    source: 0-based index of the page in the file as it was opened.
+    source: 0-based index of the page within its file.
     rotation: clockwise degrees added on top of the page's own /Rotate.
+    file: which source file. 0 is the document that was opened; inserted
+        files are appended to the document's source list and never removed
+        during a session, so a PageList snapshot in the undo history can
+        always be resolved.
     """
 
     source: int
     rotation: int = 0
+    file: int = 0
 
 
 class PageList:
@@ -79,9 +84,23 @@ class PageList:
     def rotated(self, indices: Sequence[int], delta: int) -> "PageList":
         chosen = set(self._check(indices))
         return PageList(
-            PageRef(r.source, normalize_rotation(r.rotation + delta)) if i in chosen else r
+            PageRef(r.source, normalize_rotation(r.rotation + delta), r.file)
+            if i in chosen else r
             for i, r in enumerate(self._refs)
         )
+
+    def inserted(self, refs: Sequence[PageRef], at: int) -> "PageList":
+        """Insert `refs` so the first lands at position `at` (clamped)."""
+        if not refs:
+            raise ValueError("nothing to insert")
+        # The writer maps each (file, source) to one page object; a second
+        # occurrence would need a deliberate copy. Duplicating pages is done
+        # by inserting the file again, which gets its own file index.
+        present = {(r.file, r.source) for r in self._refs}
+        if any((r.file, r.source) in present for r in refs):
+            raise ValueError("a page can only appear once in a document")
+        at = max(0, min(len(self._refs), at))
+        return PageList(self._refs[:at] + tuple(refs) + self._refs[at:])
 
     def deleted(self, indices: Sequence[int]) -> "PageList":
         chosen = set(self._check(indices))

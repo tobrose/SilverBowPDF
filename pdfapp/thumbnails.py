@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import time
 from collections import OrderedDict
+from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
 from PySide6.QtCore import QItemSelectionModel, QPoint, QRect, QSize, Qt, QTimer, Signal
@@ -52,6 +53,7 @@ class ThumbnailSidebar(QListWidget):
     move_requested = Signal(list, int)      # (selected rows, insert-before row)
     delete_requested = Signal(list)         # selected rows
     context_requested = Signal(list, object)  # (selected rows, global pos)
+    files_dropped = Signal(list, int)       # (PDF paths from outside, insert-before row)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -102,6 +104,11 @@ class ThumbnailSidebar(QListWidget):
         self._drop_before = -1
         self._autoscroll = QTimer(self, interval=16)
         self._autoscroll.timeout.connect(self._autoscroll_tick)
+        # Files dragged in from outside (Explorer). This does go through Qt's
+        # drag-and-drop -- it has to -- so the wheel is dead during it, but
+        # the edge autoscroll below still works.
+        self._external_drop = False
+        self.setAcceptDrops(True)
 
     # ---- content -------------------------------------------------------
 
@@ -278,6 +285,60 @@ class ThumbnailSidebar(QListWidget):
             self.viewport().unsetCursor()
             self.viewport().update()
 
+    # ---- files dropped from outside -------------------------------------
+
+    @staticmethod
+    def _pdf_paths(event) -> List[Path]:
+        mime = event.mimeData()
+        if not mime.hasUrls():
+            return []
+        return [Path(u.toLocalFile()) for u in mime.urls()
+                if u.isLocalFile() and u.toLocalFile().lower().endswith(".pdf")]
+
+    def dragEnterEvent(self, event) -> None:
+        # With nothing open there's nothing to insert into: ignore, and the
+        # main window takes the drop and opens the file instead.
+        if self.document is None or not self._pdf_paths(event):
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self._external_drop = True
+        self._drag_pos = event.position().toPoint()
+        self._autoscroll.start()
+        self._update_drop()
+
+    def dragMoveEvent(self, event) -> None:
+        if not self._external_drop:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self._drag_pos = event.position().toPoint()
+        self._update_drop()
+
+    def dragLeaveEvent(self, event) -> None:
+        self._end_external_drop()
+
+    def dropEvent(self, event) -> None:
+        paths = self._pdf_paths(event) if self._external_drop else []
+        before = self._drop_before
+        self._end_external_drop()
+        if not paths:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        # Deferred: inserting may prompt for a password, and a modal dialog
+        # inside the OS drag loop leaves Explorer waiting on us.
+        QTimer.singleShot(0, lambda: self.files_dropped.emit(paths, before))
+
+    def _end_external_drop(self) -> None:
+        self._external_drop = False
+        self._drop_before = -1
+        self._autoscroll.stop()
+        self.viewport().update()
+
+    def _dragging(self) -> bool:
+        return self._drag_rows is not None or self._external_drop
+
     def drop_row_at(self, y: int) -> int:
         """Insert-before row for a cursor at viewport height y: the number of
         pages whose middle is above it. Gaps and past-the-end fall out right."""
@@ -296,7 +357,7 @@ class ThumbnailSidebar(QListWidget):
     def _autoscroll_tick(self) -> None:
         """Scroll while the cursor is near or beyond the top/bottom edge,
         faster the further in. Past the edge counts as full speed."""
-        if self._drag_rows is None:
+        if not self._dragging():
             self._autoscroll.stop()
             return
         edge = min(60, self.viewport().height() // 4)
@@ -316,7 +377,7 @@ class ThumbnailSidebar(QListWidget):
 
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
-        if self._drag_rows is None or self._drop_before < 0 or self.count() == 0:
+        if not self._dragging() or self._drop_before < 0 or self.count() == 0:
             return
         if self._drop_before < self.count():
             y = self.visualItemRect(self.item(self._drop_before)).top() - self.spacing()
