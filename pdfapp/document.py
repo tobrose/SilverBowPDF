@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Tuple
 import pypdfium2 as pdfium
 import pypdfium2.raw as pdfium_c
 
-from .annots import Annot, AnnotEdits, PageKey, is_editable
+from .annots import MARKUP_KINDS, Annot, AnnotEdits, PageKey, is_editable
 from .pagelist import PageList, PageRef
 from .transform import PageTransform, normalize_rotation
 
@@ -47,6 +47,13 @@ class _Source:
     page_count: int
     has_forms: bool
     page_cache: dict = field(default_factory=dict)  # source index -> PdfPage
+    text_cache: dict = field(default_factory=dict)  # source index -> _PageText
+
+
+@dataclass
+class _PageText:
+    textpage: pdfium.PdfTextPage
+    boxes: List[Tuple[float, float, float, float]]  # loose char boxes, PDF space
 
 
 def _open_source(path: Path, password: Optional[str]) -> _Source:
@@ -97,6 +104,9 @@ class PdfDocument:
             return
         self._closed = True
         for source in self._sources:
+            for text in source.text_cache.values():
+                text.textpage.close()
+            source.text_cache.clear()
             source.page_cache.clear()
             try:
                 source.pdf.close()
@@ -214,12 +224,79 @@ class PdfDocument:
                     author=_annot_string(handle, b"T"),
                     origin=i,
                     reply_to=_reply_target(page, handle),
+                    quads=_quad_points(handle) if kind in MARKUP_KINDS else (),
                 ))
             finally:
                 pdfium_c.FPDFPage_CloseAnnot(handle)
         result = tuple(found)
         self._file_annots[key] = result
         return result
+
+    # ---- text ----------------------------------------------------------
+    #
+    # Character indices are pdfium's: content-stream order, which is reading
+    # order for nearly everything, plus generated line breaks. Ranges are
+    # inclusive (start, end) and may come in either order.
+
+    def _text(self, index: int) -> _PageText:
+        ref = self._pages[index]
+        source = self._sources[ref.file]
+        text = source.text_cache.get(ref.source)
+        if text is None:
+            textpage = self._page(index).get_textpage()
+            boxes = [textpage.get_charbox(i, loose=True) for i in range(textpage.count_chars())]
+            text = _PageText(textpage, boxes)
+            source.text_cache[ref.source] = text
+        return text
+
+    def char_count(self, index: int) -> int:
+        return len(self._text(index).boxes)
+
+    def char_at(self, index: int, x: float, y: float, tolerance: float = 1.0) -> int:
+        """Character under a PDF-space point, or -1. pdfium's own hit test --
+        this runs on every mouse move while hovering."""
+        found = self._text(index).textpage.get_index(x, y, tolerance, tolerance)
+        return -1 if found is None else found
+
+    def nearest_char(self, index: int, x: float, y: float) -> int:
+        """Closest character to a point, or -1 on a page with no text. For
+        drags that wander into margins and gaps between lines."""
+        best, best_d = -1, float("inf")
+        for i, (left, bottom, right, top) in enumerate(self._text(index).boxes):
+            if right <= left or top <= bottom:
+                continue  # generated characters (line breaks) have no area
+            dx = max(left - x, 0.0, x - right)
+            dy = max(bottom - y, 0.0, y - top)
+            d = dx * dx + dy * dy * 4  # prefer the same line over a nearer line
+            if d < best_d:
+                best, best_d = i, d
+        return best
+
+    def word_at(self, index: int, char: int) -> Tuple[int, int]:
+        """Inclusive character range of the word containing `char`."""
+        textpage = self._text(index).textpage
+        n = self.char_count(index)
+        text = textpage.get_text_range(0, n)
+        if len(text) != n or not 0 <= char < n or not text[char].isalnum():
+            return char, char
+        start, end = char, char
+        while start > 0 and text[start - 1].isalnum():
+            start -= 1
+        while end < n - 1 and text[end + 1].isalnum():
+            end += 1
+        return start, end
+
+    def text_in(self, index: int, start: int, end: int) -> str:
+        start, end = sorted((start, end))
+        return self._text(index).textpage.get_text_range(start, end - start + 1)
+
+    def text_rects(self, index: int, start: int, end: int) -> List[Tuple[float, float, float, float]]:
+        """The selected range as rectangles, one per line segment, PDF space.
+        pdfium merges characters on a line; this is what highlights cover."""
+        start, end = sorted((start, end))
+        textpage = self._text(index).textpage
+        count = textpage.count_rects(start, end - start + 1)
+        return [textpage.get_rect(i) for i in range(count)]
 
     def page_geometry(self, index: int):
         """(MediaBox, CropBox, intrinsic /Rotate) with inheritance resolved."""
@@ -358,6 +435,16 @@ class PdfDocument:
         if source.has_forms and formenv:
             pdfium_c.FPDF_FFLDraw(formenv, bitmap, page, *placement, pdfium_c.FPDF_ANNOT)
         return bitmap
+
+
+def _quad_points(handle) -> Tuple[float, ...]:
+    """A markup annotation's /QuadPoints, for hit-testing line by line."""
+    quads: List[float] = []
+    for i in range(pdfium_c.FPDFAnnot_CountAttachmentPoints(handle)):
+        q = pdfium_c.FS_QUADPOINTSF()
+        if pdfium_c.FPDFAnnot_GetAttachmentPoints(handle, i, q):
+            quads += [q.x1, q.y1, q.x2, q.y2, q.x3, q.y3, q.x4, q.y4]
+    return tuple(quads)
 
 
 def _reply_target(page, handle) -> Optional[int]:

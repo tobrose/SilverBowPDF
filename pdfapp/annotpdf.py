@@ -62,9 +62,63 @@ def _note_appearance(pdf: pikepdf.Pdf, color) -> pikepdf.Stream:
     return stream
 
 
+def _quads(annot: Annot):
+    q = annot.quads
+    for i in range(0, len(q) - 7, 8):
+        # upper-left, upper-right, lower-left, lower-right
+        yield (q[i], q[i + 1]), (q[i + 2], q[i + 3]), (q[i + 4], q[i + 5]), (q[i + 6], q[i + 7])
+
+
+def _markup_appearance(pdf: pikepdf.Pdf, annot: Annot) -> pikepdf.Stream:
+    """Drawn in page coordinates: BBox == Rect with an identity Matrix maps
+    the form straight onto the page, so quads need no conversion."""
+    ops = ["q"]
+    resources = Dictionary()
+    if annot.kind == "Highlight":
+        # Multiply: the colour darkens the page under it instead of covering
+        # it, so black text stays black. What Acrobat does.
+        resources.ExtGState = Dictionary(GS0=Dictionary(Type=Name.ExtGState, BM=Name.Multiply))
+        ops.append(f"/GS0 gs {_rgb(annot.color)} rg")
+        for ul, ur, ll, lr in _quads(annot):
+            ops.append(f"{ll[0]:.3f} {ll[1]:.3f} m {lr[0]:.3f} {lr[1]:.3f} l "
+                       f"{ur[0]:.3f} {ur[1]:.3f} l {ul[0]:.3f} {ul[1]:.3f} l h f")
+    else:
+        ops.append(f"{_rgb(annot.color)} RG")
+        for ul, ur, ll, lr in _quads(annot):
+            height = abs(ul[1] - ll[1])
+            width = max(0.6, height * 0.07)
+            # Underline sits just above the bottom of the line box (which
+            # includes descenders); strikeout goes through the x-height.
+            t = 0.12 if annot.kind == "Underline" else 0.4
+            y0 = ll[1] + (ul[1] - ll[1]) * t
+            y1 = lr[1] + (ur[1] - lr[1]) * t
+            ops.append(f"{width:.3f} w {ll[0]:.3f} {y0:.3f} m {lr[0]:.3f} {y1:.3f} l S")
+    ops.append("Q")
+    stream = pdf.make_stream(" ".join(ops).encode("ascii"))
+    stream.Type = Name.XObject
+    stream.Subtype = Name.Form
+    stream.BBox = Array(list(annot.rect))
+    stream.Resources = resources
+    return stream
+
+
 def build_annot(pdf: pikepdf.Pdf, annot: Annot) -> pikepdf.Object:
     """A new annotation dictionary (indirect) for an Annot created here."""
     now = pdf_date()
+    if annot.kind in ("Highlight", "Underline", "StrikeOut"):
+        d = Dictionary(
+            Type=Name.Annot, Subtype=Name("/" + annot.kind),
+            Rect=Array(list(annot.rect)),
+            QuadPoints=Array(list(annot.quads)),
+            Contents=String(annot.contents),
+            T=String(annot.author),
+            C=Array(list(annot.color)),
+            NM=String(f"butterpdf-{uuid.uuid4()}"),
+            M=String(now), CreationDate=String(now),
+            F=4,  # Print
+        )
+        d.AP = Dictionary(N=_markup_appearance(pdf, annot))
+        return pdf.make_indirect(d)
     if annot.kind == "Text":
         d = Dictionary(
             Type=Name.Annot, Subtype=Name.Text,

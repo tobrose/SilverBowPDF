@@ -37,6 +37,21 @@ FLAG_NOVIEW = 32
 NOTE_SIZE = 20.0                      # points; the note icon's square
 NOTE_YELLOW = (1.0, 0.85, 0.2)
 
+# Text markup: anchored to text, so selected by click but never dragged --
+# a highlight moved off its words means nothing.
+MARKUP_KINDS = frozenset({"Highlight", "Underline", "StrikeOut", "Squiggly"})
+HIGHLIGHT_COLORS = {
+    "Yellow": (1.0, 0.92, 0.23),
+    "Green": (0.55, 0.93, 0.45),
+    "Blue": (0.45, 0.78, 1.0),
+    "Pink": (1.0, 0.6, 0.8),
+}
+MARKUP_DEFAULT_COLORS = {
+    "Highlight": HIGHLIGHT_COLORS["Yellow"],
+    "Underline": (0.1, 0.45, 0.95),
+    "StrikeOut": (0.9, 0.1, 0.1),
+}
+
 KIND_NAMES = {
     "Text": "Note", "FreeText": "Text Box", "Highlight": "Highlight",
     "Underline": "Underline", "StrikeOut": "Strikeout", "Squiggly": "Squiggle",
@@ -68,6 +83,8 @@ class Annot:
     uid: identity of a created annotation (existing ones use origin).
     reply_to: origin of the annotation this one replies to (/IRT). Deleting
         a comment deletes its replies -- the writer does, so the model must.
+    quads: text markup geometry, flat /QuadPoints order: per rectangle
+        upper-left, upper-right, lower-left, lower-right (x, y each).
     """
 
     kind: str
@@ -80,6 +97,7 @@ class Annot:
     edited: bool = False
     uid: int = 0
     reply_to: Optional[int] = None
+    quads: Tuple[float, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "rect", normalize_rect(tuple(float(v) for v in self.rect)))
@@ -88,15 +106,29 @@ class Annot:
     def ident(self) -> Tuple[str, int]:
         return ("o", self.origin) if self.origin is not None else ("n", self.uid)
 
+    @property
+    def is_markup(self) -> bool:
+        return self.kind in MARKUP_KINDS
+
     def moved(self, dx: float, dy: float) -> "Annot":
         x0, y0, x1, y1 = self.rect
-        return replace(self, rect=(x0 + dx, y0 + dy, x1 + dx, y1 + dy),
+        quads = tuple(v + (dx if i % 2 == 0 else dy) for i, v in enumerate(self.quads))
+        return replace(self, rect=(x0 + dx, y0 + dy, x1 + dx, y1 + dy), quads=quads,
                        offset=(self.offset[0] + dx, self.offset[1] + dy))
 
     def with_contents(self, contents: str) -> "Annot":
         return replace(self, contents=contents, edited=True)
 
     def contains(self, x: float, y: float, slop: float = 2.0) -> bool:
+        if self.quads:
+            # Per line: a two-line highlight's bounding box also covers the
+            # unmarked ends of both lines, which shouldn't select it.
+            q = self.quads
+            for i in range(0, len(q) - 7, 8):
+                xs, ys = q[i:i + 8:2], q[i + 1:i + 8:2]
+                if min(xs) - slop <= x <= max(xs) + slop and min(ys) - slop <= y <= max(ys) + slop:
+                    return True
+            return False
         x0, y0, x1, y1 = self.rect
         return x0 - slop <= x <= x1 + slop and y0 - slop <= y <= y1 + slop
 
@@ -123,6 +155,26 @@ def new_note(x: float, y: float, contents: str, author: str,
     """A sticky note whose icon's top-left corner is at (x, y), PDF space."""
     return Annot("Text", (x, y - NOTE_SIZE, x + NOTE_SIZE, y), contents=contents,
                  author=author, color=color, uid=next(_uids))
+
+
+def new_markup(kind: str, rects: Iterable[Rect], author: str,
+               color: Optional[Tuple[float, float, float]] = None) -> Annot:
+    """A Highlight / Underline / StrikeOut over text rectangles (PDF space)."""
+    if kind not in MARKUP_DEFAULT_COLORS:
+        raise ValueError(f"not a text markup kind: {kind}")
+    quads: list = []
+    xs: list = []
+    ys: list = []
+    for rect in rects:
+        left, bottom, right, top = normalize_rect(rect)
+        quads += [left, top, right, top, left, bottom, right, bottom]
+        xs += [left, right]
+        ys += [bottom, top]
+    if not quads:
+        raise ValueError("no text to mark")
+    return Annot(kind, (min(xs), min(ys), max(xs), max(ys)), author=author,
+                 color=color or MARKUP_DEFAULT_COLORS[kind], quads=tuple(quads),
+                 uid=next(_uids))
 
 
 class AnnotEdits:

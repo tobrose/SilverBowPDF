@@ -20,7 +20,8 @@ import pikepdf  # noqa: E402
 from pikepdf import Array, Dictionary, Name, String  # noqa: E402
 
 from pdfapp.annotpdf import overlay_pdf  # noqa: E402
-from pdfapp.annots import AnnotEdits, DocState, new_note, without  # noqa: E402
+from pdfapp.annots import (  # noqa: E402
+    HIGHLIGHT_COLORS, AnnotEdits, DocState, new_markup, new_note, without)
 from pdfapp.document import PdfDocument  # noqa: E402
 from pdfapp.pagelist import History, PageList  # noqa: E402
 from pdfapp.writer import commit, write_pdf  # noqa: E402
@@ -269,6 +270,103 @@ def test_annotations_follow_their_page():
             assert saved.file_annots(2) == ()
             for i in range(saved.page_count):
                 assert _differing_pixels(_render(saved, i), preview[i]) == 0, f"page {i + 1}"
+
+
+# ---- text and text markup ----------------------------------------------------
+
+def _find(doc, index, needle):
+    text = doc.text_in(index, 0, doc.char_count(index) - 1)
+    start = text.index(needle)
+    return start, start + len(needle) - 1
+
+
+def test_text_layer():
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp, "a.pdf")
+        _make_annotated_pdf(src)
+        with PdfDocument(src) as doc:
+            start, end = _find(doc, 0, "quick brown")
+            assert doc.text_in(0, end, start) == "quick brown", "either order"
+            rects = doc.text_rects(0, start, end)
+            assert len(rects) == 1, rects
+            left, bottom, right, top = rects[0]
+            assert 630 < bottom < top < 665 and 72 < left < right < 400, rects[0]
+            assert start <= doc.char_at(0, (left + right) / 2, (bottom + top) / 2) <= end
+            assert doc.char_at(0, 300, 100) == -1, "empty area"
+            first, _ = _find(doc, 0, "The quick")
+            assert doc.nearest_char(0, 40, 645) == first, "margin left of the line"
+            assert doc.word_at(0, start + 2) == (start, start + 4)  # "quick"
+            # Two lines: "Annotated page 1" through "The" -> one rect per line
+            a, _ = _find(doc, 0, "Annotated")
+            _, the = _find(doc, 0, "The")
+            assert len(doc.text_rects(0, a, the)) == 2
+
+
+def test_markup_preview_matches_saved():
+    with tempfile.TemporaryDirectory() as tmp:
+        src, out = Path(tmp, "a.pdf"), Path(tmp, "out.pdf")
+        _make_annotated_pdf(src)
+        with PdfDocument(src) as doc:
+            marks = {}
+            for index, kind, needle in ((0, "Highlight", "quick brown"),
+                                        (0, "Underline", "jumps over"),
+                                        (0, "StrikeOut", "lazy"),
+                                        (1, "Highlight", "Annotated page 2"),
+                                        (2, "Highlight", "brown fox"),     # rotated page
+                                        (2, "StrikeOut", "Annotated")):
+                rects = doc.text_rects(index, *_find(doc, index, needle))
+                marks.setdefault(index, []).append(new_markup(kind, rects, "tester"))
+            # A highlight across two lines: two quads, one annotation.
+            a, _ = _find(doc, 0, "Annotated")
+            _, the = _find(doc, 0, "The")
+            two = new_markup("Highlight", doc.text_rects(0, a, the), "tester",
+                             HIGHLIGHT_COLORS["Green"])
+            assert len(two.quads) == 16
+            marks[0].append(two)
+            edits = doc.annots
+            for index, new in marks.items():
+                edits = edits.with_page(doc.page_key(index), doc.file_annots(index) + tuple(new))
+            doc.annots = edits
+            preview = {(i, vr): _render(doc, i, vr, _overlay(doc, i))
+                       for i in range(3) for vr in (0, 270)}
+            commit(write_pdf(doc.sources, doc.pages, out, annots=doc.annots), out)
+
+        with PdfDocument(out) as saved:
+            for (i, vr), want in preview.items():
+                bad = _differing_pixels(_render(saved, i, vr), want)
+                assert bad == 0, f"page {i + 1} view {vr}: {bad} pixels differ from preview"
+            assert [a.kind for a in saved.file_annots(0)][-4:] == \
+                ["Highlight", "Underline", "StrikeOut", "Highlight"]
+        with pikepdf.open(out) as pdf:
+            hl = [a for a in pdf.pages[0].obj.Annots if a.Subtype == Name.Highlight][-1]
+            assert len(hl.QuadPoints) == 16 and [float(c) for c in hl.C] == \
+                list(HIGHLIGHT_COLORS["Green"])
+            assert hl.AP.N.Resources.ExtGState.GS0.BM == Name.Multiply
+
+
+def test_markup_text_stays_readable():
+    """A highlight must not hide the text under it: pixels inside the
+    highlighted word that were dark stay dark."""
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp, "a.pdf")
+        _make_annotated_pdf(src)
+        with PdfDocument(src) as doc:
+            rects = doc.text_rects(1, *_find(doc, 1, "Annotated page 2"))
+            doc.annots = doc.annots.with_page(
+                doc.page_key(1), doc.file_annots(1) + (new_markup("Highlight", rects, "t"),))
+            w, h, plain = _render(doc, 1, 0, None, scale=1.0)
+            _, _, marked = _render(doc, 1, 0, _overlay(doc, 1), scale=1.0)
+            left, bottom, right, top = rects[0]
+            dark = changed_dark = 0
+            for y in range(int(792 - top) + 2, int(792 - bottom) - 2):
+                for x in range(int(left) + 2, int(right) - 2):
+                    i = (y * w + x) * 4
+                    if max(plain[i:i + 3]) < 80:      # a text pixel
+                        dark += 1
+                        if max(marked[i:i + 3]) > 110:
+                            changed_dark += 1
+            assert dark > 50, "fixture: expected text under the highlight"
+            assert changed_dark == 0, f"{changed_dark} text pixels washed out"
 
 
 if __name__ == "__main__":

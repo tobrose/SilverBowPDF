@@ -7,8 +7,9 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QActionGroup, QKeySequence
+from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QDockWidget,
     QFileDialog,
@@ -20,10 +21,11 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QSpinBox,
     QToolBar,
+    QToolButton,
     QWidget,
 )
 
-from .annots import Annot, DocState, describe, new_note
+from .annots import HIGHLIGHT_COLORS, Annot, DocState, describe, new_note
 from .document import DocumentError, PasswordRequired, PdfDocument, SourceInfo
 from .pagelist import History, PageList
 from .pageview import FitMode, PdfView, Tool
@@ -158,8 +160,32 @@ class MainWindow(QMainWindow):
                                        triggered=lambda: self.view.set_tool(Tool.SELECT))
         self.act_tool_note = QAction("Note", self, shortcut=QKeySequence("N"), checkable=True,
                                      triggered=lambda: self.view.set_tool(Tool.NOTE))
-        for act in (self.act_tool_select, self.act_tool_note):
+        self.act_tool_highlight = QAction("Highlight", self, shortcut=QKeySequence("H"),
+                                          checkable=True,
+                                          triggered=lambda: self.view.set_tool(Tool.HIGHLIGHT))
+        self.act_tool_underline = QAction("Underline", self, shortcut=QKeySequence("U"),
+                                          checkable=True,
+                                          triggered=lambda: self.view.set_tool(Tool.UNDERLINE))
+        self.act_tool_strikeout = QAction("Strikethrough", self, shortcut=QKeySequence("S"),
+                                          checkable=True,
+                                          triggered=lambda: self.view.set_tool(Tool.STRIKEOUT))
+        self.tool_actions = {
+            Tool.SELECT: self.act_tool_select, Tool.NOTE: self.act_tool_note,
+            Tool.HIGHLIGHT: self.act_tool_highlight, Tool.UNDERLINE: self.act_tool_underline,
+            Tool.STRIKEOUT: self.act_tool_strikeout,
+        }
+        for act in self.tool_actions.values():
             self.tool_group.addAction(act)
+
+        self.highlight_menu = QMenu("Highlight Colour", self)
+        for name, color in HIGHLIGHT_COLORS.items():
+            act = self.highlight_menu.addAction(self._swatch(color), name)
+            act.triggered.connect(lambda _=False, c=color: self._set_highlight_color(c))
+
+        self.act_copy = QAction("&Copy", self, shortcut=QKeySequence.Copy, triggered=self.copy_text)
+        self.act_copy.setEnabled(False)
+        self.act_select_all = QAction("Select &All", self, shortcut=QKeySequence.SelectAll,
+                                      triggered=self.select_all)
         self.act_delete_annot = QAction("Delete Annotation", self,
                                         triggered=self.view.delete_selected_annot)
 
@@ -218,7 +244,17 @@ class MainWindow(QMainWindow):
         self.addToolBar(tools)
         tools.addAction(self.act_tool_select)
         tools.addAction(self.act_tool_note)
+        tools.addSeparator()
+        # The highlighter carries its colour menu on the button's arrow.
+        highlight = QToolButton(self)
+        highlight.setDefaultAction(self.act_tool_highlight)
+        highlight.setMenu(self.highlight_menu)
+        highlight.setPopupMode(QToolButton.MenuButtonPopup)
+        tools.addWidget(highlight)
+        tools.addAction(self.act_tool_underline)
+        tools.addAction(self.act_tool_strikeout)
         self.view.tool_changed.connect(self._on_tool_changed)
+        self.view.text_selection_changed.connect(self.act_copy.setEnabled)
 
     def _build_menus(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
@@ -233,11 +269,15 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(self.act_undo)
         edit_menu.addAction(self.act_redo)
         edit_menu.addSeparator()
+        edit_menu.addAction(self.act_copy)
+        edit_menu.addAction(self.act_select_all)
+        edit_menu.addSeparator()
         edit_menu.addAction(self.act_delete_annot)
 
         tools_menu = self.menuBar().addMenu("&Tools")
-        tools_menu.addAction(self.act_tool_select)
-        tools_menu.addAction(self.act_tool_note)
+        for act in self.tool_actions.values():
+            tools_menu.addAction(act)
+        tools_menu.addMenu(self.highlight_menu)
 
         view_menu = self.menuBar().addMenu("&View")
         view_menu.addAction(self.act_zoom_in)
@@ -283,7 +323,8 @@ class MainWindow(QMainWindow):
                     self.act_rotate_ccw, self.act_rotate_cw, self.act_page_rot_ccw,
                     self.act_page_rot_cw, self.act_page_up, self.act_page_down,
                     self.act_page_delete, self.act_page_extract, self.act_page_insert,
-                    self.act_tool_select, self.act_tool_note, self.act_delete_annot, self.act_next,
+                    *self.tool_actions.values(), self.act_delete_annot, self.act_select_all,
+                    self.act_next,
                     self.act_prev, self.act_first,
                     self.act_last, self.act_goto):
             act.setEnabled(enabled)
@@ -406,7 +447,34 @@ class MainWindow(QMainWindow):
         self._show_state(state, self.view.current_page)
 
     def _on_tool_changed(self, tool: Tool) -> None:
-        {Tool.SELECT: self.act_tool_select, Tool.NOTE: self.act_tool_note}[tool].setChecked(True)
+        self.tool_actions[tool].setChecked(True)
+
+    @staticmethod
+    def _swatch(color) -> QIcon:
+        pixmap = QPixmap(14, 14)
+        pixmap.fill(QColor.fromRgbF(*color))
+        return QIcon(pixmap)
+
+    def _set_highlight_color(self, color) -> None:
+        self.view.highlight_color = color
+        self.act_tool_highlight.setIcon(self._swatch(color))
+        self.view.set_tool(Tool.HIGHLIGHT)
+
+    # ---- text ----------------------------------------------------------
+
+    def copy_text(self) -> None:
+        text = self.view.selected_text()
+        if text:
+            QApplication.clipboard().setText(text)
+            self.statusBar().showMessage(f"Copied {len(text)} characters", 3000)
+
+    def select_all(self) -> None:
+        # Ctrl+A means "all pages" in the sidebar and "all text on this
+        # page" in the page view; one shortcut, routed by focus.
+        if self.sidebar.hasFocus():
+            self.sidebar.selectAll()
+        else:
+            self.view.select_all_text()
 
     def _on_note_requested(self, index: int, x: float, y: float) -> None:
         text, ok = QInputDialog.getMultiLineText(self, "Add Note", "Note:")
@@ -492,15 +560,22 @@ class MainWindow(QMainWindow):
             return
         index = self.view.page_at(pos)
         if index is not None:
-            self._pages_menu([index], self.view.viewport().mapToGlobal(pos))
+            self._pages_menu([index], self.view.viewport().mapToGlobal(pos), text_actions=True)
 
-    def _pages_menu(self, indices: list[int], global_pos) -> None:
+    def _pages_menu(self, indices: list[int], global_pos, text_actions: bool = False) -> None:
         doc = self.view.document
         if doc is None or not indices:
             return
         what = self._describe(indices)
         n = doc.page_count
         menu = QMenu(self)
+        selection = self.view.text_selection()
+        if text_actions and selection is not None and selection[0] == indices[0]:
+            menu.addAction(self.act_copy)
+            for kind, label in (("Highlight", "Highlight"), ("Underline", "Underline"),
+                                ("StrikeOut", "Strikethrough")):
+                menu.addAction(label, lambda k=kind: self.view.mark_selection(k))
+            menu.addSeparator()
         menu.addAction(f"Rotate {what} Left", lambda: self.rotate_pages(indices, -90))
         menu.addAction(f"Rotate {what} Right", lambda: self.rotate_pages(indices, 90))
         menu.addSeparator()

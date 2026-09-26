@@ -32,6 +32,8 @@ pdfapp/
   document.py    pypdfium2 wrapper. NO Qt imports -- must stay headless-testable.
                  Takes *displayed* indices; maps them through its PageList to a
                  page of one of its sources. Sources are only ever added.
+                 Text layer (char_at/nearest_char/word_at/text_in/text_rects)
+                 is pdfium's; char indices are pdfium's, ranges inclusive.
   writer.py      The only code that writes PDFs. pikepdf. write to temp -> commit (os.replace).
                  prune_dangling() drops bookmarks/links/fields/dests aimed at removed pages.
                  Foreign pages: plain append + _merge_forms, NOT add_pages_from (see rule 6).
@@ -139,9 +141,17 @@ delete / edit-comment for existing annotations of any type (links, widgets,
 popups and hidden ones pass through untouched), sticky notes with their own
 appearance streams. Packaging done; installer verified where it's deployed.
 
-Next, in order (user chose all of these): text selection + highlight /
-underline / strikeout; text boxes / typewriter; shapes, ink, stamps;
-authoring fillable form fields; form filling; encryption.
+Annotations stage 2: text selection (drag, double-click word, Ctrl+A,
+Ctrl+C), Highlight H / Underline U / Strikethrough S tools (sticky until Esc),
+highlight colour presets, mark-selection from the right-click menu. Text
+markup is anchored: click selects it, dragging inside selects the text under
+it, it is never moved. Highlights use a Multiply-blend AP so text stays
+readable (tested).
+
+Next, in order (user chose all of these): text boxes / typewriter; shapes, ink, stamps;
+authoring fillable form fields; form filling; encryption; OCR for scanned
+pages (user confirmed it's required; engine not chosen -- weigh machine-image
+size/CPU/Windows Server support and ask before adding a dependency).
 
 Deployment target is shared multi-session desktops: no GPU, non-persistent
 profiles, pixels re-encoded over a remote-display protocol. Keep memory and repaints lean; don't

@@ -9,6 +9,7 @@ with virtualised page slots -- not worth the complexity yet.
 
 from __future__ import annotations
 
+import getpass
 from enum import Enum
 from typing import List, Optional
 
@@ -25,7 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .annots import Annot, describe, without
+from .annots import HIGHLIGHT_COLORS, Annot, describe, new_markup, without
 from .document import PdfDocument
 from .rendering import PageRenderer
 from .transform import PageTransform, normalize_rotation
@@ -47,6 +48,14 @@ class FitMode(Enum):
 class Tool(Enum):
     SELECT = "select"
     NOTE = "note"
+    HIGHLIGHT = "highlight"
+    UNDERLINE = "underline"
+    STRIKEOUT = "strikeout"
+
+
+# Tools that mark text: drag across it, a markup annotation lands on release.
+MARKUP_TOOLS = {Tool.HIGHLIGHT: "Highlight", Tool.UNDERLINE: "Underline",
+                Tool.STRIKEOUT: "StrikeOut"}
 
 
 class PageWidget(QWidget):
@@ -159,6 +168,7 @@ class PdfView(QScrollArea):
     annot_open = Signal(int, object)           # page index, Annot (double-clicked)
     note_requested = Signal(int, float, float) # page index, PDF x, y
     tool_changed = Signal(object)              # Tool
+    text_selection_changed = Signal(bool)      # whether any text is selected
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -171,7 +181,10 @@ class PdfView(QScrollArea):
         self._current_page = 0
         self._tool = Tool.SELECT
         self._selected = None   # (page key, annot ident) or None
-        self._drag = None       # in-progress annotation move, see page_mouse_press
+        self._drag = None       # in-progress mouse drag, see page_mouse_press
+        self._text_sel = None   # (page index, anchor char, focus char)
+        self.highlight_color = HIGHLIGHT_COLORS["Yellow"]
+        self.author = getpass.getuser()  # /T on annotations created here
         self.setFocusPolicy(Qt.StrongFocus)  # Delete and Esc for annotations
 
         self.setWidgetResizable(True)
@@ -194,7 +207,7 @@ class PdfView(QScrollArea):
 
         self.verticalScrollBar().valueChanged.connect(self._update_current_page)
 
-    # ---- tools and annotations -------------------------------------------
+    # ---- tools, text selection and annotations ----------------------------
 
     @property
     def tool(self) -> Tool:
@@ -205,10 +218,74 @@ class PdfView(QScrollArea):
             return
         self._tool = tool
         self._drag = None
-        cursor = Qt.CrossCursor if tool is Tool.NOTE else Qt.ArrowCursor
         for page in self._pages:
-            page.setCursor(cursor)
+            page.setCursor(self._tool_cursor())
         self.tool_changed.emit(tool)
+
+    def _tool_cursor(self):
+        if self._tool is Tool.NOTE:
+            return Qt.CrossCursor
+        if self._tool in MARKUP_TOOLS:
+            return Qt.IBeamCursor
+        return Qt.ArrowCursor
+
+    # -- text selection: (page index, anchor char, focus char), inclusive
+
+    def text_selection(self):
+        return self._text_sel
+
+    def selected_text(self) -> str:
+        if self._text_sel is None:
+            return ""
+        index, start, end = self._text_sel
+        return self.document.text_in(index, start, end)
+
+    def set_text_selection(self, index: int, start: int, end: int) -> None:
+        old = self._text_sel
+        self._text_sel = (index, start, end)
+        if old != self._text_sel:
+            self._update_pages({index} | ({old[0]} if old else set()))
+            if old is None:
+                self.text_selection_changed.emit(True)
+
+    def clear_text_selection(self) -> None:
+        if self._text_sel is not None:
+            index = self._text_sel[0]
+            self._text_sel = None
+            self._update_pages({index})
+            self.text_selection_changed.emit(False)
+
+    def select_all_text(self) -> bool:
+        if self.document is None:
+            return False
+        index = self._current_page
+        count = self.document.char_count(index)
+        if count == 0:
+            return False
+        self.set_text_selection(index, 0, count - 1)
+        return True
+
+    def mark_selection(self, kind: str) -> bool:
+        """Turn the text selection into a Highlight / Underline / StrikeOut."""
+        if self._text_sel is None:
+            return False
+        index, start, end = self._text_sel
+        rects = self.document.text_rects(index, start, end)
+        if not rects:
+            return False
+        color = self.highlight_color if kind == "Highlight" else None
+        mark = new_markup(kind, rects, self.author, color)
+        self.clear_text_selection()
+        self.annots_edit.emit(self.document.page_key(index),
+                              self.document.page_annots(index) + (mark,), f"Add {describe(kind)}")
+        return True
+
+    def _update_pages(self, indices) -> None:
+        for i in indices:
+            if 0 <= i < len(self._pages):
+                self._pages[i].update()
+
+    # -- annotation selection
 
     def select_annot(self, index: int, ident) -> None:
         self._selected = (self.document.page_key(index), ident) if ident is not None else None
@@ -243,6 +320,22 @@ class PdfView(QScrollArea):
                 return annot
         return None
 
+    def _char_near(self, page: "PageWidget", pos: QPoint, exact: bool = False) -> int:
+        x, y = page.pdf_point_at(pos)
+        tolerance = 2.0 / max(page.widget_transform().scale, 1e-6)
+        char = self.document.char_at(page.index, x, y, tolerance)
+        if char < 0 and not exact:
+            char = self.document.nearest_char(page.index, x, y)
+        return char
+
+    # -- mouse
+    #
+    # _drag is one of:
+    #   {"mode": "move", ...}  dragging a (non-markup) annotation
+    #   {"mode": "text", ...}  selecting text; "anchor" is set once the drag
+    #                          passes the threshold, so a plain click selects
+    #                          nothing (and, on a highlight, keeps it selected)
+
     def page_mouse_press(self, page: "PageWidget", event) -> bool:
         if event.button() != Qt.LeftButton or self.document is None:
             return False
@@ -252,11 +345,15 @@ class PdfView(QScrollArea):
             x, y = page.pdf_point_at(pos)
             self.note_requested.emit(page.index, x, y)
             return True
-        annot = self._annot_at(page, pos)
+        annot = None if self._tool in MARKUP_TOOLS else self._annot_at(page, pos)
         self.select_annot(page.index, annot.ident if annot else None)
-        if annot is not None:
-            self._drag = {"page": page, "annot": annot, "press": pos,
+        if annot is not None and not annot.is_markup:
+            self.clear_text_selection()
+            self._drag = {"mode": "move", "page": page, "annot": annot, "press": pos,
                           "start": page.pdf_point_at(pos), "delta": None}
+        else:
+            self._drag = {"mode": "text", "page": page, "press": pos, "anchor": None,
+                          "annot": annot}
         return True
 
     def page_mouse_move(self, page: "PageWidget", event) -> bool:
@@ -265,46 +362,78 @@ class PdfView(QScrollArea):
         pos = event.position().toPoint()
         drag = self._drag
         if drag is not None and event.buttons() & Qt.LeftButton and drag["page"] is page:
-            if drag["delta"] is None and \
+            started = drag.get("delta") is not None or drag.get("anchor") is not None
+            if not started and \
                     (pos - drag["press"]).manhattanLength() < QApplication.startDragDistance():
                 return True
-            x, y = page.pdf_point_at(pos)
-            drag["delta"] = (x - drag["start"][0], y - drag["start"][1])
-            page.update()
+            if drag["mode"] == "move":
+                x, y = page.pdf_point_at(pos)
+                drag["delta"] = (x - drag["start"][0], y - drag["start"][1])
+                page.update()
+                return True
+            if drag["anchor"] is None:
+                anchor = self._char_near(page, drag["press"])
+                if anchor < 0:
+                    return True  # no text on this page
+                drag["anchor"] = anchor
+                if drag["annot"] is not None:
+                    self.select_annot(page.index, None)  # a drag means text, not the mark
+            focus = self._char_near(page, pos)
+            if focus >= 0:
+                self.set_text_selection(page.index, drag["anchor"], focus)
             return True
-        if self._tool is Tool.SELECT and not event.buttons():
-            annot = self._annot_at(page, pos)
-            page.setCursor(Qt.SizeAllCursor if annot else Qt.ArrowCursor)
-            if annot is not None and annot.contents:
-                who = f"{annot.author}: " if annot.author else ""
-                QToolTip.showText(event.globalPosition().toPoint(),
-                                  f"{who}{annot.contents}", page)
-            else:
-                QToolTip.hideText()
+        if not event.buttons():
+            self._hover(page, pos, event)
         return False
+
+    def _hover(self, page: "PageWidget", pos: QPoint, event) -> None:
+        if self._tool is not Tool.SELECT:
+            return
+        annot = self._annot_at(page, pos)
+        if annot is not None and not annot.is_markup:
+            page.setCursor(Qt.SizeAllCursor)
+        elif self._char_near(page, pos, exact=True) >= 0:
+            page.setCursor(Qt.IBeamCursor)
+        else:
+            page.setCursor(Qt.ArrowCursor)
+        if annot is not None and annot.contents:
+            who = f"{annot.author}: " if annot.author else ""
+            QToolTip.showText(event.globalPosition().toPoint(), f"{who}{annot.contents}", page)
+        else:
+            QToolTip.hideText()
 
     def page_mouse_release(self, page: "PageWidget", event) -> bool:
         drag, self._drag = self._drag, None
         if drag is None or event.button() != Qt.LeftButton:
             return False
-        if drag["delta"] is not None:
-            dx, dy = drag["delta"]
-            moved = drag["annot"]
-            annots = tuple(a.moved(dx, dy) if a.ident == moved.ident else a
-                           for a in self.document.page_annots(page.index))
-            self.annots_edit.emit(self.document.page_key(page.index), annots,
-                                  f"Move {describe(moved.kind)}")
+        if drag["mode"] == "move":
+            if drag["delta"] is not None:
+                dx, dy = drag["delta"]
+                moved = drag["annot"]
+                annots = tuple(a.moved(dx, dy) if a.ident == moved.ident else a
+                               for a in self.document.page_annots(page.index))
+                self.annots_edit.emit(self.document.page_key(page.index), annots,
+                                      f"Move {describe(moved.kind)}")
+        elif drag["anchor"] is None:
+            self.clear_text_selection()  # a click, not a drag
+        elif self._tool in MARKUP_TOOLS:
+            self.mark_selection(MARKUP_TOOLS[self._tool])
         page.update()
         return True
 
     def page_double_click(self, page: "PageWidget", event) -> bool:
         if self._tool is not Tool.SELECT or self.document is None:
             return False
-        annot = self._annot_at(page, event.position().toPoint())
-        if annot is None:
-            return False
-        self.annot_open.emit(page.index, annot)
-        return True
+        pos = event.position().toPoint()
+        annot = self._annot_at(page, pos)
+        if annot is not None:
+            self.annot_open.emit(page.index, annot)
+            return True
+        char = self._char_near(page, pos, exact=True)
+        if char >= 0:
+            self.set_text_selection(page.index, *self.document.word_at(page.index, char))
+            return True
+        return False
 
     def delete_selected_annot(self) -> bool:
         found = self.selected_annot()
@@ -322,26 +451,32 @@ class PdfView(QScrollArea):
         if event.key() == Qt.Key_Escape:
             self._drag = None
             self.set_tool(Tool.SELECT)
+            self.clear_text_selection()
             if self._selected is not None:
                 self.select_annot(0, None)
             return
         super().keyPressEvent(event)
 
     def paint_page_chrome(self, page: "PageWidget", painter: QPainter) -> None:
-        """Selection outline (and drag preview) over a rendered page. UI
-        chrome only -- the annotation itself is always drawn by pdfium."""
+        """Text selection, and the selected annotation's outline and drag
+        preview. UI chrome only -- annotations are always drawn by pdfium."""
+        if self._text_sel is not None and self._text_sel[0] == page.index:
+            _, start, end = self._text_sel
+            for rect in self.document.text_rects(page.index, start, end):
+                painter.fillRect(self._widget_rect(page, rect), QColor(0, 120, 215, 70))
+
         found = self.selected_annot()
         if found is None or found[0] != page.index:
             return
         annot = found[1]
         rect = annot.rect
         drag = self._drag
-        if drag is not None and drag["page"] is page and drag["delta"] is not None:
+        if drag is not None and drag["mode"] == "move" and drag["page"] is page \
+                and drag["delta"] is not None:
             rect = annot.moved(*drag["delta"]).rect
             painter.fillRect(self._widget_rect(page, rect), QColor(40, 110, 230, 40))
         r = self._widget_rect(page, rect).adjusted(-3, -3, 3, 3)
-        pen = QPen(QColor(40, 110, 230), 1.5, Qt.DashLine)
-        painter.setPen(pen)
+        painter.setPen(QPen(QColor(40, 110, 230), 1.5, Qt.DashLine))
         painter.setBrush(Qt.NoBrush)
         painter.drawRect(r)
 
@@ -363,6 +498,9 @@ class PdfView(QScrollArea):
         self.document = document
         self._selected = None
         self._drag = None
+        if self._text_sel is not None:
+            self._text_sel = None
+            self.text_selection_changed.emit(False)
         self.renderer = PageRenderer(document) if document is not None else None
         target = self._current_page if keep_view else 0
         if not keep_view:
@@ -381,6 +519,7 @@ class PdfView(QScrollArea):
             return
         if self.renderer is not None:
             self.renderer.clear()  # cache is keyed by displayed index, now stale
+        self.clear_text_selection()  # indexes a page that may have moved
         self._rebuild()
         self._apply_fit()  # the widest page may have been deleted or rotated
         # New widgets have no position until the layout runs; scrolling to one
