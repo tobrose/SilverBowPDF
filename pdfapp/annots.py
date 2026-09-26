@@ -206,9 +206,23 @@ def _cut(box: _Box, cutters) -> list:
     return pieces
 
 
-def lay_markup(annots: Iterable[Annot], new: Annot) -> Tuple[Annot, ...]:
-    """Add markup `new` to a page's annotations, one layer per kind."""
+def lay_markup(annots: Iterable[Annot], new: Annot,
+               char_boxes: Optional[Iterable[_Box]] = None) -> Tuple[Annot, ...]:
+    """Add markup `new` to a page's annotations, one layer per kind.
+
+    char_boxes: the page's character boxes. A piece left over after cutting
+    that has no character under it is dropped -- marks drawn wider than
+    their text (common from other apps) would otherwise leave slivers of
+    the old colour at both ends of a fully re-marked line.
+    """
     cutters = [box for box, _ in _quad_boxes(new.quads)]
+    centers = None if char_boxes is None else [
+        ((l + r) / 2, (b + t) / 2) for l, b, r, t in char_boxes if r > l and t > b]
+
+    def has_text(piece: _Box) -> bool:
+        left, bottom, right, top = piece
+        return any(left <= x <= right and bottom <= y <= top for x, y in centers)
+
     kept: list = []
     covered: list = []
     for a in annots:
@@ -217,7 +231,13 @@ def lay_markup(annots: Iterable[Annot], new: Annot) -> Tuple[Annot, ...]:
             continue
         pieces: list = []
         for box, aligned in _quad_boxes(a.quads):
-            pieces += _cut(box, cutters) if aligned else [box]
+            if not aligned:
+                pieces.append(box)
+                continue
+            cut = _cut(box, cutters)
+            if cut != [box] and centers is not None:
+                cut = [piece for piece in cut if has_text(piece)]
+            pieces += cut
         if pieces == [box for box, _ in _quad_boxes(a.quads)]:
             kept.append(a)
         elif not pieces:

@@ -467,6 +467,35 @@ def test_new_colour_replaces_existing_file_highlight():
                 "old highlight kept, split around the new one, comment intact"
 
 
+def test_remarking_whole_line_leaves_no_slivers():
+    """Reported: page 1's file highlight is drawn wider than its text. Green
+    over the whole sentence left thin yellow ends where there's no text.
+    With the page's characters, textless leftovers are dropped, the old mark
+    is fully replaced, and its comment moves to the new one."""
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp, "a.pdf")
+        _make_annotated_pdf(src)
+        with PdfDocument(src) as doc:
+            rects = doc.text_rects(0, *_find(doc, 0, "The quick brown fox jumps over the lazy dog."))
+            green = new_markup("Highlight", rects, "t", HIGHLIGHT_COLORS["Green"])
+            old = next(a for a in doc.file_annots(0) if a.kind == "Highlight")
+            assert old.rect[0] < rects[0][0] and old.rect[2] > rects[0][2],                 "fixture: old highlight must be wider than its text"
+
+            without_text = lay_markup(doc.file_annots(0), green)
+            assert any(a.ident == old.ident for a in without_text), "slivers kept (no text info)"
+
+            result = lay_markup(doc.file_annots(0), green, doc.char_boxes(0))
+            highlights = [a for a in result if a.kind == "Highlight"]
+            assert len(highlights) == 1 and highlights[0].color == HIGHLIGHT_COLORS["Green"]
+            assert highlights[0].contents == "important", "comment carried over"
+
+            # Partial re-mark still keeps the old mark where it covers text.
+            part = new_markup("Highlight", doc.text_rects(0, *_find(doc, 0, "brown fox")), "t")
+            kept = [a for a in lay_markup(doc.file_annots(0), part, doc.char_boxes(0))
+                    if a.ident == old.ident]
+            assert len(kept) == 1 and len(kept[0].quads) == 16
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

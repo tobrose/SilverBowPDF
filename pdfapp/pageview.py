@@ -277,7 +277,8 @@ class PdfView(QScrollArea):
         mark = new_markup(kind, rects, self.author, color)
         self.clear_text_selection()
         self.annots_edit.emit(self.document.page_key(index),
-                              lay_markup(self.document.page_annots(index), mark),
+                              lay_markup(self.document.page_annots(index), mark,
+                                         self.document.char_boxes(index)),
                               f"Add {describe(kind)}")
         return True
 

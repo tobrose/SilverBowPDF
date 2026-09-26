@@ -252,6 +252,10 @@ class PdfDocument:
     def char_count(self, index: int) -> int:
         return len(self._text(index).boxes)
 
+    def char_boxes(self, index: int) -> List[Tuple[float, float, float, float]]:
+        """Loose character boxes (left, bottom, right, top), PDF space."""
+        return self._text(index).boxes
+
     def char_at(self, index: int, x: float, y: float, tolerance: float = 1.0) -> int:
         """Character under a PDF-space point, or -1. pdfium's own hit test --
         this runs on every mouse move while hovering."""
