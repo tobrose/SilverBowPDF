@@ -85,6 +85,9 @@ class Annot:
         a comment deletes its replies -- the writer does, so the model must.
     quads: text markup geometry, flat /QuadPoints order: per rectangle
         upper-left, upper-right, lower-left, lower-right (x, y each).
+    reshaped: an existing markup whose quads were cut by a newer mark of
+        the same kind (see lay_markup); the writer rewrites its /QuadPoints
+        and /Rect and draws it a new appearance, keeping everything else.
     """
 
     kind: str
@@ -98,6 +101,7 @@ class Annot:
     uid: int = 0
     reply_to: Optional[int] = None
     quads: Tuple[float, ...] = ()
+    reshaped: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "rect", normalize_rect(tuple(float(v) for v in self.rect)))
@@ -155,6 +159,84 @@ def new_note(x: float, y: float, contents: str, author: str,
     """A sticky note whose icon's top-left corner is at (x, y), PDF space."""
     return Annot("Text", (x, y - NOTE_SIZE, x + NOTE_SIZE, y), contents=contents,
                  author=author, color=color, uid=next(_uids))
+
+
+# ---- one layer of each markup kind ------------------------------------------
+#
+# Marking text that's already marked with the same kind replaces the old mark
+# on that text instead of stacking on it: highlights multiply, so stacked ones
+# darken without limit until the text is gone. The older mark is cut back --
+# split if the new one lands in its middle, removed if it's covered entirely.
+
+_Box = Tuple[float, float, float, float]  # left, bottom, right, top
+
+
+def _quad_boxes(quads: Tuple[float, ...]):
+    """(box, axis_aligned) per quad. Only axis-aligned quads -- ordinary
+    horizontal text -- can be cut; anything else is left alone."""
+    for i in range(0, len(quads) - 7, 8):
+        xs, ys = sorted(quads[i:i + 8:2]), sorted(quads[i + 1:i + 8:2])
+        aligned = xs[1] - xs[0] < 0.5 and xs[3] - xs[2] < 0.5             and ys[1] - ys[0] < 0.5 and ys[3] - ys[2] < 0.5
+        yield (xs[0], ys[0], xs[3], ys[3]), aligned
+
+
+def _boxes_to_quads(boxes) -> Tuple[float, ...]:
+    quads: list = []
+    for left, bottom, right, top in boxes:
+        quads += [left, top, right, top, left, bottom, right, bottom]
+    return tuple(quads)
+
+
+def _cut(box: _Box, cutters) -> list:
+    """`box` minus the parts on the same line that any cutter covers."""
+    pieces = [box]
+    for cl, cb, cr, ct in cutters:
+        next_pieces = []
+        for left, bottom, right, top in pieces:
+            overlap = min(top, ct) - max(bottom, cb)
+            same_line = overlap > 0.5 * min(top - bottom, ct - cb)
+            if not same_line or cr <= left or cl >= right:
+                next_pieces.append((left, bottom, right, top))
+                continue
+            if cl - left > 0.5:
+                next_pieces.append((left, bottom, cl, top))
+            if right - cr > 0.5:
+                next_pieces.append((cr, bottom, right, top))
+        pieces = next_pieces
+    return pieces
+
+
+def lay_markup(annots: Iterable[Annot], new: Annot) -> Tuple[Annot, ...]:
+    """Add markup `new` to a page's annotations, one layer per kind."""
+    cutters = [box for box, _ in _quad_boxes(new.quads)]
+    kept: list = []
+    covered: list = []
+    for a in annots:
+        if a.kind != new.kind or not a.quads:
+            kept.append(a)
+            continue
+        pieces: list = []
+        for box, aligned in _quad_boxes(a.quads):
+            pieces += _cut(box, cutters) if aligned else [box]
+        if pieces == [box for box, _ in _quad_boxes(a.quads)]:
+            kept.append(a)
+        elif not pieces:
+            covered.append(a)
+        else:
+            kept.append(replace(
+                a, quads=_boxes_to_quads(pieces), reshaped=True,
+                rect=(min(p[0] for p in pieces), min(p[1] for p in pieces),
+                      max(p[2] for p in pieces), max(p[3] for p in pieces))))
+
+    # A mark covered completely goes -- but its comment moves to the new
+    # mark rather than vanishing with it.
+    comments = [a.contents for a in covered if a.contents]
+    if comments and not new.contents:
+        new = replace(new, contents="\n\n".join(comments))
+    result = tuple(kept)
+    for gone in covered:
+        result = without(result + (gone,), gone)  # takes its replies too
+    return result + (new,)
 
 
 def new_markup(kind: str, rects: Iterable[Rect], author: str,

@@ -146,7 +146,10 @@ Ctrl+C), Highlight H / Underline U / Strikethrough S tools (sticky until Esc),
 highlight colour presets, mark-selection from the right-click menu. Text
 markup is anchored: click selects it, dragging inside selects the text under
 it, it is never moved. Highlights use a Multiply-blend AP so text stays
-readable (tested).
+readable (tested). One layer per markup kind (user's rule): new marks cut
+back older marks of the same kind on the same text (`lay_markup`) -- split,
+or removed with the comment carried over -- so highlights never stack and
+darken. Existing file markups get reshaped (new /QuadPoints + regenerated AP).
 
 Next, in order (user chose all of these): text boxes / typewriter; shapes, ink, stamps;
 authoring fillable form fields; form filling; encryption; OCR for scanned

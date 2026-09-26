@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .annots import HIGHLIGHT_COLORS, Annot, describe, new_markup, without
+from .annots import HIGHLIGHT_COLORS, Annot, describe, lay_markup, new_markup, without
 from .document import PdfDocument
 from .rendering import PageRenderer
 from .transform import PageTransform, normalize_rotation
@@ -277,7 +277,8 @@ class PdfView(QScrollArea):
         mark = new_markup(kind, rects, self.author, color)
         self.clear_text_selection()
         self.annots_edit.emit(self.document.page_key(index),
-                              self.document.page_annots(index) + (mark,), f"Add {describe(kind)}")
+                              lay_markup(self.document.page_annots(index), mark),
+                              f"Add {describe(kind)}")
         return True
 
     def _update_pages(self, indices) -> None:

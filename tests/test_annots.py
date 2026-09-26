@@ -20,8 +20,9 @@ import pikepdf  # noqa: E402
 from pikepdf import Array, Dictionary, Name, String  # noqa: E402
 
 from pdfapp.annotpdf import overlay_pdf  # noqa: E402
+from pdfapp.annots import _quad_boxes  # noqa: E402
 from pdfapp.annots import (  # noqa: E402
-    HIGHLIGHT_COLORS, AnnotEdits, DocState, new_markup, new_note, without)
+    HIGHLIGHT_COLORS, AnnotEdits, DocState, lay_markup, new_markup, new_note, without)
 from pdfapp.document import PdfDocument  # noqa: E402
 from pdfapp.pagelist import History, PageList  # noqa: E402
 from pdfapp.writer import commit, write_pdf  # noqa: E402
@@ -367,6 +368,103 @@ def test_markup_text_stays_readable():
                             changed_dark += 1
             assert dark > 50, "fixture: expected text under the highlight"
             assert changed_dark == 0, f"{changed_dark} text pixels washed out"
+
+
+# ---- one layer per markup kind -------------------------------------------------
+
+def _box(left, right, bottom=100.0, top=112.0):
+    return (left, bottom, right, top)
+
+
+def test_lay_markup_model():
+    blue, green = HIGHLIGHT_COLORS["Blue"], HIGHLIGHT_COLORS["Green"]
+    old = new_markup("Highlight", [_box(100, 200)], "a", blue).with_contents("keep me")
+    under = new_markup("Underline", [_box(100, 200)], "a")
+
+    # New mark inside the old one: old splits in two, keeps its comment.
+    result = lay_markup((old, under), new_markup("Highlight", [_box(140, 160)], "b", green))
+    split = next(a for a in result if a.ident == old.ident)
+    assert [box for box, _ in _quad_boxes(split.quads)] \
+        == [_box(100, 140), _box(160, 200)]
+    assert split.contents == "keep me" and split.color == blue and split.rect == _box(100, 200)
+    assert under in result, "a highlight never cuts an underline"
+
+    # Covered completely: old goes, its comment moves to the new mark.
+    result = lay_markup((old,), new_markup("Highlight", [_box(90, 210)], "b", green))
+    assert [a.color for a in result] == [green] and result[0].contents == "keep me"
+
+    # Other line: untouched.
+    other_line = new_markup("Highlight", [_box(100, 200, 300, 312)], "b", green)
+    assert lay_markup((old,), other_line)[0] == old
+
+    # Same text again and again: always exactly one layer.
+    marks = (old,)
+    for _ in range(5):
+        marks = lay_markup(marks, new_markup("Highlight", [_box(100, 200)], "a", blue))
+    assert len(marks) == 1
+
+
+def _page_render_with(doc, index, marks_for_page):
+    doc.annots = AnnotEdits().with_page(doc.page_key(index), marks_for_page)
+    return _render(doc, index, 0, _overlay(doc, index), scale=1.0)
+
+
+def test_repeated_highlight_never_darkens():
+    """The reported bug: highlighting the same words again must not stack."""
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp, "a.pdf")
+        _make_annotated_pdf(src)
+        with PdfDocument(src) as doc:
+            rects = doc.text_rects(1, *_find(doc, 1, "quick brown"))
+            wider = doc.text_rects(1, *_find(doc, 1, "The quick brown fox"))
+            base = doc.file_annots(1)
+            once = _page_render_with(doc, 1, lay_markup(base, new_markup("Highlight", rects, "t")))
+            marks = base
+            for color in HIGHLIGHT_COLORS.values():   # every colour, over and over
+                for r in (rects, wider, rects):
+                    marks = lay_markup(marks, new_markup("Highlight", r, "t", color))
+            marks = lay_markup(marks, new_markup("Highlight", rects, "t"))  # end on yellow
+            # "quick brown" is now yellow, the rest of the wider span the last
+            # colour -- compare only inside "quick brown".
+            many = _page_render_with(doc, 1, marks)
+            assert [a.kind for a in marks].count("Highlight") == 2, marks
+            left, bottom, right, top = rects[0]
+            w = once[0]
+            for y in range(int(792 - top) + 1, int(792 - bottom) - 1):
+                for x in range(int(left) + 1, int(right) - 1):
+                    i = (y * w + x) * 4
+                    assert once[2][i:i + 3] == many[2][i:i + 3], f"pixel {x},{y} darkened"
+
+
+def test_new_colour_replaces_existing_file_highlight():
+    """Page 1's file highlight is yellow across the sentence. Green over
+    'brown fox' must show pure green there -- no yellow under it -- keep the
+    old highlight (and its comment) on the rest, and save as previewed."""
+    with tempfile.TemporaryDirectory() as tmp:
+        src, out = Path(tmp, "a.pdf"), Path(tmp, "out.pdf")
+        _make_annotated_pdf(src)
+        with PdfDocument(src) as doc:
+            rects = doc.text_rects(0, *_find(doc, 0, "brown fox"))
+            green = new_markup("Highlight", rects, "t", HIGHLIGHT_COLORS["Green"])
+            recoloured = _page_render_with(doc, 0, lay_markup(doc.file_annots(0), green))
+            reference = _page_render_with(  # the old highlight gone entirely, green alone
+                doc, 0, tuple(a for a in doc.file_annots(0) if a.kind != "Highlight") + (green,))
+            left, bottom, right, top = rects[0]
+            w = recoloured[0]
+            for y in range(int(792 - top) + 1, int(792 - bottom) - 1):
+                for x in range(int(left) + 1, int(right) - 1):
+                    i = (y * w + x) * 4
+                    assert recoloured[2][i:i + 3] == reference[2][i:i + 3], f"yellow under green at {x},{y}"
+
+            doc.annots = AnnotEdits().with_page(doc.page_key(0), lay_markup(doc.file_annots(0), green))
+            preview = _render(doc, 0, 0, _overlay(doc, 0))
+            commit(write_pdf(doc.sources, doc.pages, out, annots=doc.annots), out)
+        with PdfDocument(out) as saved:
+            assert _differing_pixels(_render(saved, 0), preview) == 0
+            highlights = [a for a in saved.file_annots(0) if a.kind == "Highlight"]
+            assert len(highlights) == 2
+            assert highlights[0].contents == "important" and len(highlights[0].quads) == 16, \
+                "old highlight kept, split around the new one, comment intact"
 
 
 if __name__ == "__main__":

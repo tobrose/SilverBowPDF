@@ -16,13 +16,14 @@ import io
 import time
 import uuid
 import warnings
+from dataclasses import replace
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple
 
 import pikepdf
 from pikepdf import Array, Dictionary, Name, String
 
-from .annots import NOTE_SIZE, Annot, is_editable
+from .annots import MARKUP_DEFAULT_COLORS, NOTE_SIZE, Annot, is_editable
 
 
 def pdf_date(t: Optional[float] = None) -> str:
@@ -172,6 +173,20 @@ def _flags(d) -> int:
         return 0
 
 
+def _reshape_markup(pdf: pikepdf.Pdf, d: Dictionary, a: Annot) -> None:
+    """New geometry for an existing markup cut back by a newer one. Its old
+    appearance showed the old shape, so it gets a new one, in its own colour."""
+    try:
+        color = tuple(float(c) for c in d.C)
+        if len(color) != 3:
+            raise ValueError
+    except (AttributeError, TypeError, ValueError):
+        color = MARKUP_DEFAULT_COLORS.get(a.kind, (1.0, 1.0, 0.0))
+    d.QuadPoints = Array(list(a.quads))
+    d.Rect = Array(list(a.rect))
+    d.AP = Dictionary(N=_markup_appearance(pdf, replace(a, color=color)))
+
+
 def apply_edits(pdf: pikepdf.Pdf, page_obj: Dictionary, annots: Sequence[Annot]) -> None:
     """Make page_obj's /Annots match `annots`.
 
@@ -214,7 +229,9 @@ def apply_edits(pdf: pikepdf.Pdf, page_obj: Dictionary, annots: Sequence[Annot])
                 translate(d, *a.offset)
             if a.edited:
                 d.Contents = String(a.contents)
-            if a.offset != (0.0, 0.0) or a.edited:
+            if a.reshaped:
+                _reshape_markup(pdf, d, a)
+            if a.offset != (0.0, 0.0) or a.edited or a.reshaped:
                 now = now or pdf_date()
                 d.M = String(now)
         result.append(d)
