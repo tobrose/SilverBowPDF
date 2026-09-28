@@ -165,7 +165,9 @@ FreeText (other apps' too, restyled in Helvetica keeping size/colour).
 Helvetica/WinAnsi only: non-cp1252 text is refused, never saved as '?'.
 Text reads upright on rotated pages (AP /Matrix counter-rotates by the page
 rotation at typing time); typing is blocked while the *view* is rotated.
-Single-key tool shortcuts are disabled while the editor is open.
+Single-key tool shortcuts are disabled while the editor is open. Finishing
+(click away, Esc, Ctrl+Enter) also returns to the Select tool, and the
+click-away does nothing else (user's request: no accidental new boxes).
 
 Next, in order (user chose all of these): shapes, ink, stamps;
 authoring fillable form fields; form filling; encryption; OCR for scanned

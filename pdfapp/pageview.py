@@ -400,6 +400,12 @@ class PdfView(QScrollArea):
     def page_mouse_press(self, page: "PageWidget", event) -> bool:
         if event.button() != Qt.LeftButton or self.document is None:
             return False
+        if self._editor is not None:
+            # A click away from the text you're typing means "done": finish
+            # it (which also leaves the text tool) and do nothing else --
+            # not start another box, not select what's under the click.
+            self.commit_text_edit()
+            return True
         self.setFocus(Qt.MouseFocusReason)
         pos = event.position().toPoint()
         if self._tool is Tool.NOTE:
@@ -601,6 +607,11 @@ class PdfView(QScrollArea):
         widget.deleteLater()
         self.setFocus(Qt.OtherFocusReason)
         self.editing_changed.emit(False)
+        # However typing ended -- click away, Esc, Ctrl+Enter -- it ends the
+        # text tool too (the user asked for this; an idle click shouldn't
+        # spawn a box).
+        if self._tool in TEXT_TOOLS:
+            self.set_tool(Tool.SELECT)
 
         index = page.index
         if self.document is None or page.document is not self.document                 or index >= self.document.page_count:

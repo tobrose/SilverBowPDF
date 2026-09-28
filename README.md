@@ -44,7 +44,7 @@ on a headless box.
 | `H` / `U` / `S` | Highlight / Underline / Strikethrough tools -- drag across text |
 | Drag on text, double-click a word | Select text; `Ctrl+C` copies, `Ctrl+A` selects the page |
 | Right-click selected text | Copy, highlight, underline or strike it through |
-| `T` / `X` | Typewriter / Text Box: click (or drag a width) and type; `Esc` or click away to finish |
+| `T` / `X` | Typewriter / Text Box: click (or drag a width) and type; `Esc` or click away to finish (back to Select) |
 | Double-click a text box | Edit its text in place |
 | Click, drag, `Delete` | Select, move, delete an annotation |
 | Double-click an annotation | Edit its comment |
