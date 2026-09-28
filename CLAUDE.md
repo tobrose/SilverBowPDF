@@ -174,8 +174,9 @@ width re-wraps, height is clamped so text is never cut off. `fixed_width`
 it a width. Only while the text reads upright on screen.
 
 Annotations stage 4: Rectangle R / Ellipse E (Shift = square/circle),
-Line L / Arrow A (Shift = 45 degree snap), Pen P (smoothed ink, one
-annotation per stroke) -- these stay active until Esc; Stamps (menu:
+Line L / Arrow A (Shift = 45 degree snap) -- return to Select once drawn,
+new shape selected (user's preference); Pen P (smoothed ink, one
+annotation per stroke) stays active until Esc; Stamps (menu:
 Approved/Reviewed/Received carry author + time; Draft/Confidential/
 Rejected plain) place once then return to Select, upright on rotated pages
 like text. Shape style menu: colour + 1-8pt width. Lines and ink hit-test
@@ -192,6 +193,14 @@ profiles, pixels re-encoded over a remote-display protocol. Keep memory and repa
 count on per-user settings surviving logoff.
 
 ## Known limits (don't "fix" these without discussion)
+
+- Form pages: fields are tinted light blue (pdfium highlight, as Acrobat/
+  Edge do). Draw order is content, fields, annotations -- NOT pdfium's
+  native content, annotations, fields -- so ink over a checkbox lies on
+  top. Any form page with annotations is therefore always layered
+  (annotpdf.overlay_args is the single rule; tests use it too).
+- XFA (LiveCycle) forms: pdfium can't show their fields; the status bar
+  says so. Converting XFA isn't planned.
 
 - Save resets undo history. The saved file becomes the new source, and old
   PageList snapshots index into the previous file.

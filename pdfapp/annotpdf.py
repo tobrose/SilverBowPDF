@@ -525,6 +525,26 @@ def apply_edits(pdf: pikepdf.Pdf, page_obj: Dictionary, annots: Sequence[Annot])
         del page_obj["/Annots"]
 
 
+def overlay_args(doc, index: int):
+    """Arguments for overlay_pdf for displayed page `index` of a
+    PdfDocument, or None when the page renders straight from the file.
+
+    The one rule for when a page is layered: it has annotation edits, or it
+    is a form page carrying other annotations (so they draw over the fields;
+    see PdfDocument.render_bitmap). The renderer and the tests both use it.
+    """
+    edits = doc.annots.get(doc.page_key(index))
+    forms = doc.page_has_forms(index)
+    if edits is None:
+        if not (forms and doc.file_annots(index)):
+            return None
+        edits = doc.file_annots(index)
+    ref = doc.pages[index]
+    source = doc.sources[ref.file]
+    media, crop, rotate = doc.page_geometry(index)
+    return (Path(source.path), source.password, ref.source, edits, media, crop, rotate, forms)
+
+
 def overlay_pdf(
     source: Path,
     password: Optional[str],
@@ -533,6 +553,7 @@ def overlay_pdf(
     mediabox: Tuple[float, float, float, float],
     cropbox: Tuple[float, float, float, float],
     rotate: int,
+    drop_widgets: bool = False,
 ) -> bytes:
     """A one-page PDF holding only this page's annotations, edits applied.
 
@@ -557,6 +578,12 @@ def overlay_pdf(
 
         src_annots = src.pages[page_index].obj.get("/Annots")
         if isinstance(src_annots, Array):
+            if drop_widgets:
+                # The form environment draws those (before this overlay).
+                # Null, not remove: edits address /Annots by index.
+                src_annots = Array([None if isinstance(d, Dictionary)
+                                    and d.get("/Subtype") == Name.Widget else d
+                                    for d in src_annots])
             for d in src_annots:
                 if isinstance(d, Dictionary):
                     for key in ("/P", "/Parent") if _kind(d) != "Popup" else ("/P",):
@@ -569,6 +596,8 @@ def overlay_pdf(
                 src_annots = src.make_indirect(src_annots)
             page.Annots = out.copy_foreign(src_annots)
         apply_edits(out, page, annots)
+        if isinstance(page.get("/Annots"), Array):
+            page.Annots = Array([d for d in page.Annots if d is not None])
 
         buf = io.BytesIO()
         with warnings.catch_warnings():

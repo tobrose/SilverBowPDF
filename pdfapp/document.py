@@ -15,6 +15,12 @@ from .pagelist import PageList, PageRef
 from .textlayout import parse_da
 from .transform import PageTransform, normalize_rotation
 
+# Acrobat's light field blue, RGB(204, 215, 255). pdfium's header says the
+# colour is 0x00RRGGBB, but it reads it as a Windows COLORREF, 0x00BBGGRR
+# (measured: 0xCCD7FF came out peach). tests/test_annots checks the tint.
+FIELD_HIGHLIGHT = 0xFFD7CC
+FIELD_HIGHLIGHT_ALPHA = 90
+
 _ANNOT_KINDS = {
     getattr(pdfium_c, f"FPDF_ANNOT_{name.upper()}"): name
     for name in ("Text", "Link", "FreeText", "Line", "Square", "Circle", "Polygon",
@@ -47,6 +53,7 @@ class _Source:
     pdf: pdfium.PdfDocument
     page_count: int
     has_forms: bool
+    form_type: int = 0
     page_cache: dict = field(default_factory=dict)  # source index -> PdfPage
     text_cache: dict = field(default_factory=dict)  # source index -> _PageText
 
@@ -68,13 +75,20 @@ def _open_source(path: Path, password: Optional[str]) -> _Source:
         raise DocumentError(f"could not open {path.name}: {exc}") from exc
 
     # Form fields only render if the form environment is initialised.
+    form_type = 0
     try:
-        has_forms = pdf.get_formtype() != 0
+        form_type = pdf.get_formtype()
+        has_forms = form_type != 0
         if has_forms:
             pdf.init_forms()
+            # Fields often have no border or background of their own; every
+            # mainstream viewer tints them so they can be found. Without this
+            # an empty form looks like a blank page.
+            pdfium_c.FPDF_SetFormFieldHighlightColor(pdf.formenv, 0, FIELD_HIGHLIGHT)
+            pdfium_c.FPDF_SetFormFieldHighlightAlpha(pdf.formenv, FIELD_HIGHLIGHT_ALPHA)
     except Exception:
         has_forms = False
-    return _Source(SourceInfo(path, password), pdf, count, has_forms)
+    return _Source(SourceInfo(path, password), pdf, count, has_forms, form_type)
 
 
 class PdfDocument:
@@ -329,6 +343,16 @@ class PdfDocument:
         return any(s.has_forms for s in self._sources)
 
     @property
+    def is_xfa(self) -> bool:
+        """An XFA (Adobe LiveCycle) form. pdfium -- like Chrome and Edge --
+        only shows the fallback page content, which often has no fields."""
+        return self._sources[0].form_type in (pdfium_c.FORMTYPE_XFA_FULL,
+                                                pdfium_c.FORMTYPE_XFA_FOREGROUND)
+
+    def page_has_forms(self, index: int) -> bool:
+        return self._source(index).has_forms
+
+    @property
     def title(self) -> str:
         try:
             meta = self._sources[0].pdf.get_metadata_dict()
@@ -422,10 +446,13 @@ class PdfDocument:
         unless you have a reason not to.
 
         overlay: a one-page PDF of this page's annotations with edits applied
-        (annotpdf.overlay_pdf). The page is then drawn in the same three
-        passes pdfium's normal render makes -- content, annotations, form
-        fields -- except the annotations come from the overlay. Same boxes,
-        same rotation, same bitmap: the result is what the saved page renders.
+        (annotpdf.overlay_pdf), form widgets left out. The page is then drawn
+        in three passes: content, form fields, annotations. Annotations go
+        LAST, unlike pdfium's own render (which draws fields over them), so
+        a pen stroke across a checkbox lies on top of it, as on paper and in
+        Acrobat. The renderer uses this path for any page with annotation
+        edits, and for any form page carrying other annotations, so a page
+        is drawn the same way before and after saving.
         """
         page = self._page(index)
         source = self._source(index)
@@ -445,6 +472,9 @@ class PdfDocument:
         # Exactly the placement page.render used (no crop): origin, full
         # size, rotation as a quarter-turn count.
         placement = (0, 0, bitmap.width, bitmap.height, rotation // 90)
+        formenv = getattr(page, "formenv", None)
+        if source.has_forms and formenv:
+            pdfium_c.FPDF_FFLDraw(formenv, bitmap, page, *placement, pdfium_c.FPDF_ANNOT)
         overlay_doc = pdfium.PdfDocument(overlay)
         try:
             overlay_page = overlay_doc[0]
@@ -455,9 +485,6 @@ class PdfDocument:
                 overlay_page.close()
         finally:
             overlay_doc.close()
-        formenv = getattr(page, "formenv", None)
-        if source.has_forms and formenv:
-            pdfium_c.FPDF_FFLDraw(formenv, bitmap, page, *placement, pdfium_c.FPDF_ANNOT)
         return bitmap
 
 

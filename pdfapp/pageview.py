@@ -88,7 +88,7 @@ class Tool(Enum):
 MARKUP_TOOLS = {Tool.HIGHLIGHT: "Highlight", Tool.UNDERLINE: "Underline",
                 Tool.STRIKEOUT: "StrikeOut"}
 TEXT_TOOLS = (Tool.TYPEWRITER, Tool.TEXTBOX)
-# Drag to draw; they stay selected for drawing several, Esc leaves.
+# Drag to draw. Shapes return to Select once drawn; the pen stays until Esc.
 DRAW_TOOLS = (Tool.RECT, Tool.ELLIPSE, Tool.LINE, Tool.ARROW, Tool.PEN)
 RESIZABLE_SHAPES = ("Square", "Circle")
 
@@ -656,6 +656,12 @@ class PdfView(QScrollArea):
             label = "Add Arrow" if arrow else "Add Line"
         self.annots_edit.emit(doc.page_key(page.index), doc.page_annots(page.index) + (annot,),
                               label)
+        if self._tool is not Tool.PEN:
+            # One shape per pick (user's preference), selected so it can be
+            # nudged or resized straight away. The pen stays: handwriting and
+            # signatures take many strokes.
+            self.select_annot(page.index, annot.ident)
+            self.set_tool(Tool.SELECT)
 
     def _paint_drawing(self, page: "PageWidget", painter: QPainter, drag) -> None:
         """Preview while dragging -- chrome; pdfium draws the real thing."""

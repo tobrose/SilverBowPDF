@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import pikepdf  # noqa: E402
 from pikepdf import Array, Dictionary, Name, String  # noqa: E402
 
-from pdfapp.annotpdf import overlay_pdf  # noqa: E402
+from pdfapp.annotpdf import overlay_args, overlay_pdf  # noqa: E402
 from dataclasses import replace  # noqa: E402
 
 from pdfapp.annots import (  # noqa: E402
@@ -124,13 +124,13 @@ def _render(doc, index, view_rotation=0, overlay=None, scale=0.75):
 
 
 def _overlay(doc, index):
-    edits = doc.annots.get(doc.page_key(index))
-    if edits is None:
-        return None
-    media, crop, rotate = doc.page_geometry(index)
-    source = doc.sources[doc.pages[index].file]
-    return overlay_pdf(source.path, source.password, doc.pages[index].source, edits,
-                       media, crop, rotate)
+    args = overlay_args(doc, index)  # the app's own rule for when to layer
+    return None if args is None else overlay_pdf(*args)
+
+
+def _shown(doc, index, view_rotation=0, scale=0.75):
+    """A page exactly as the app draws it (layered where the app layers)."""
+    return _render(doc, index, view_rotation, _overlay(doc, index), scale)
 
 
 def _differing_pixels(a, b) -> int:
@@ -211,10 +211,10 @@ def test_preview_matches_saved():
 
         with PdfDocument(out) as saved:
             for (i, vr), want in preview.items():
-                got = _render(saved, i, vr)
+                got = _shown(saved, i, vr)
                 bad = _differing_pixels(got, want)
                 assert bad == 0, f"page {i + 1} view {vr}: {bad} pixels differ from preview"
-            assert _render(saved, 0) != unedited, "edits must actually change the page"
+            assert _shown(saved, 0) != unedited, "edits must actually change the page"
 
 
 def test_edits_land_in_the_file():
@@ -283,7 +283,7 @@ def test_annotations_follow_their_page():
             assert [a.contents for a in saved.file_annots(1)] == ["sideways page"]
             assert saved.file_annots(2) == ()
             for i in range(saved.page_count):
-                assert _differing_pixels(_render(saved, i), preview[i]) == 0, f"page {i + 1}"
+                assert _differing_pixels(_shown(saved, i), preview[i]) == 0, f"page {i + 1}"
 
 
 # ---- text and text markup ----------------------------------------------------
@@ -347,7 +347,7 @@ def test_markup_preview_matches_saved():
 
         with PdfDocument(out) as saved:
             for (i, vr), want in preview.items():
-                bad = _differing_pixels(_render(saved, i, vr), want)
+                bad = _differing_pixels(_shown(saved, i, vr), want)
                 assert bad == 0, f"page {i + 1} view {vr}: {bad} pixels differ from preview"
             assert [a.kind for a in saved.file_annots(0)][-4:] == \
                 ["Highlight", "Underline", "StrikeOut", "Highlight"]
@@ -473,7 +473,7 @@ def test_new_colour_replaces_existing_file_highlight():
             preview = _render(doc, 0, 0, _overlay(doc, 0))
             commit(write_pdf(doc.sources, doc.pages, out, annots=doc.annots), out)
         with PdfDocument(out) as saved:
-            assert _differing_pixels(_render(saved, 0), preview) == 0
+            assert _differing_pixels(_shown(saved, 0), preview) == 0
             highlights = [a for a in saved.file_annots(0) if a.kind == "Highlight"]
             assert len(highlights) == 2
             assert highlights[0].contents == "important" and len(highlights[0].quads) == 16, \
@@ -564,7 +564,7 @@ def test_text_preview_matches_saved():
             commit(write_pdf(doc.sources, doc.pages, out, annots=doc.annots), out)
         with PdfDocument(out) as saved:
             for (i, vr), want in preview.items():
-                bad = _differing_pixels(_render(saved, i, vr), want)
+                bad = _differing_pixels(_shown(saved, i, vr), want)
                 assert bad == 0, f"page {i + 1} view {vr}: {bad} pixels differ"
             typed = [a for a in saved.file_annots(1) if a.kind == "FreeText"]
             assert [a.contents for a in typed][0].startswith("Edited: now longer")
@@ -604,7 +604,7 @@ def test_resized_text_wraps_and_saves_as_previewed():
             commit(write_pdf(doc.sources, doc.pages, out, annots=doc.annots), out)
         with PdfDocument(out) as saved:
             for n, i in enumerate((0, 1)):
-                assert _differing_pixels(_render(saved, i), preview[n]) == 0, f"page {i + 1}"
+                assert _differing_pixels(_shown(saved, i), preview[n]) == 0, f"page {i + 1}"
             got = next(a for a in saved.file_annots(0) if a.contents == words)
             assert abs((got.rect[2] - got.rect[0]) - 120) < 0.01 and not got.boxed
         with pikepdf.open(out) as pdf:
@@ -674,7 +674,7 @@ def test_shapes_preview_matches_saved():
             commit(write_pdf(doc.sources, doc.pages, out, annots=doc.annots), out)
         with PdfDocument(out) as saved:
             for (i, vr), want in preview.items():
-                bad = _differing_pixels(_render(saved, i, vr), want)
+                bad = _differing_pixels(_shown(saved, i, vr), want)
                 assert bad == 0, f"page {i + 1} view {vr}: {bad} pixels differ"
             kinds = [a.kind for a in saved.file_annots(0)]
             for kind in ("Square", "Circle", "Line", "Ink", "Stamp"):
@@ -737,11 +737,52 @@ def test_moving_saved_line_and_ink():
             preview = _render(doc, 0, 0, _overlay(doc, 0))
             commit(write_pdf(doc.sources, doc.pages, out, annots=doc.annots), out)
         with PdfDocument(out) as saved:
-            assert _differing_pixels(_render(saved, 0), preview) == 0
+            assert _differing_pixels(_shown(saved, 0), preview) == 0
             line = next(a for a in saved.file_annots(0) if a.kind == "Line")
             assert [round(v) for v in line.line] == [100, 190, 320, 110]
             ink = next(a for a in saved.file_annots(0) if a.kind == "Ink")
             assert [round(v) for v in ink.ink[0][:2]] == [100, 55]
+
+
+# ---- form fields -----------------------------------------------------------------
+
+def _pixel(render, x, y):
+    w, _, buf = render
+    i = (y * w + x) * 4
+    return buf[i + 2], buf[i + 1], buf[i]  # BGRx -> RGB
+
+
+def test_form_fields_are_highlighted():
+    """Page 2's text field has no border or background of its own. Like
+    every mainstream viewer, the empty part of the field is tinted so the
+    field can be found."""
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp, "a.pdf")
+        _make_annotated_pdf(src)
+        with PdfDocument(src) as doc:
+            shown = _shown(doc, 1, scale=1.0)
+            r, g, b = _pixel(shown, 380, 792 - 515)   # inside the field, right of its text
+            outside = _pixel(shown, 380, 792 - 560)
+            assert b > r + 15 and (r, g, b) != outside, f"field not tinted: {(r, g, b)} vs {outside}"
+
+
+def test_annotations_draw_over_form_fields():
+    """Reported: a pen stroke across a checkbox went under it. Annotations
+    must lie on top of form fields, in the preview and in the saved file."""
+    with tempfile.TemporaryDirectory() as tmp:
+        src, out = Path(tmp, "a.pdf"), Path(tmp, "out.pdf")
+        _make_annotated_pdf(src)
+        with PdfDocument(src) as doc:
+            stroke = new_ink((110, 515, 390, 515), "t", (0.0, 0.8, 0.0), 8)
+            doc.annots = doc.annots.with_page(doc.page_key(1), doc.file_annots(1) + (stroke,))
+            preview = _shown(doc, 1, scale=1.0)
+            commit(write_pdf(doc.sources, doc.pages, out, annots=doc.annots), out)
+        with PdfDocument(out) as saved:
+            after = _shown(saved, 1, scale=1.0)
+        assert _differing_pixels(after, preview) == 0
+        for x in (130, 200, 300, 370):   # along the stroke, across the field
+            r, g, b = _pixel(after, x, 792 - 515)
+            assert g > 150 and r < 80 and b < 80, f"field drawn over the ink at x={x}: {(r, g, b)}"
 
 
 if __name__ == "__main__":

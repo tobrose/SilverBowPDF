@@ -968,6 +968,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{document.path.name}[*] — {APP_NAME}")
         self._refresh_page_count()
         forms = "  ·  has form fields" if document.has_forms else ""
+        if document.is_xfa:
+            forms = ("  ·  XFA form: its fields can't be shown or filled here "
+                     "(same as Chrome/Edge) -- open it in Acrobat")
         self.status_left.setText(f"{document.path}{forms}")
         self._set_document_actions_enabled(True)
 

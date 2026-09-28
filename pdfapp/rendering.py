@@ -17,7 +17,7 @@ from typing import Optional, Tuple
 
 from PySide6.QtGui import QImage
 
-from .annotpdf import overlay_pdf
+from .annotpdf import overlay_args, overlay_pdf
 from .document import PdfDocument
 
 _LITTLE_ENDIAN = sys.byteorder == "little"
@@ -88,16 +88,12 @@ class PageRenderer:
     def _overlay(self, index: int) -> Optional[bytes]:
         """The page's edited annotations as a one-page PDF, or None if the
         page has no annotation edits and renders straight from the file."""
-        doc = self.document
-        edits = doc.annots.get(doc.page_key(index))
-        if edits is None:
+        args = overlay_args(self.document, index)
+        if args is None:
             return None
-        ref = doc.pages[index]
-        source = doc.sources[ref.file]
-        media, crop, rotate = doc.page_geometry(index)
-        stat = Path(source.path).stat()
-        return _cached_overlay(str(source.path), stat.st_mtime_ns, stat.st_size,
-                               source.password, ref.source, edits, media, crop, rotate)
+        path, *rest = args
+        stat = path.stat()
+        return _cached_overlay(str(path), stat.st_mtime_ns, stat.st_size, *rest)
 
     def image(self, index: int, scale: float, view_rotation: int = 0) -> QImage:
         key = self._key(index, scale, view_rotation)
@@ -136,8 +132,10 @@ class PageRenderer:
 
 
 @functools.lru_cache(maxsize=32)
-def _cached_overlay(path, mtime_ns, size, password, page_index, edits, media, crop, rotate):
+def _cached_overlay(path, mtime_ns, size, password, page_index, edits, media, crop, rotate,
+                    drop_widgets):
     """Shared by every renderer (page view, thumbnails), so one edit builds
     its overlay once. mtime and size are in the key so an overlay built from
     a file's old contents is never reused after that file is saved over."""
-    return overlay_pdf(Path(path), password, page_index, edits, media, crop, rotate)
+    return overlay_pdf(Path(path), password, page_index, edits, media, crop, rotate,
+                       drop_widgets)
