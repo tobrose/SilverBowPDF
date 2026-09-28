@@ -20,7 +20,10 @@ import pikepdf  # noqa: E402
 from pikepdf import Array, Dictionary, Name, String  # noqa: E402
 
 from pdfapp.annotpdf import overlay_pdf  # noqa: E402
-from pdfapp.annots import _quad_boxes  # noqa: E402
+from dataclasses import replace  # noqa: E402
+
+from pdfapp.annots import TEXT_COLORS, _quad_boxes, new_text  # noqa: E402
+from pdfapp.textlayout import PADDING, encodable, layout, parse_da, text_width  # noqa: E402
 from pdfapp.annots import (  # noqa: E402
     HIGHLIGHT_COLORS, AnnotEdits, DocState, lay_markup, new_markup, new_note, without)
 from pdfapp.document import PdfDocument  # noqa: E402
@@ -92,7 +95,13 @@ def _make_annotated_pdf(path):
                   DA=String("/Helv 14 Tf 0 g"))
     sq2 = annot(p2, Subtype=Name.Square, Rect=Array([300, 200, 400, 300]),
                 AP=Dictionary(N=_ap(pdf, 100, 100, "0 0.6 0 RG 3 w 2 2 96 96 re S")))
-    p2.Annots = Array([field, sq2])
+    typed = annot(p2, Subtype=Name.FreeText, Rect=Array([72, 400, 272, 420]),
+                  Contents=String("Typed elsewhere"), DA=String("/Helv 14 Tf 1 0 0 rg"),
+                  Border=Array([0, 0, 0]),
+                  AP=Dictionary(N=_ap(pdf, 200, 20,
+                                      "BT /F1 14 Tf 1 0 0 rg 2 5 Td (Typed elsewhere) Tj ET")))
+    typed.AP.N.Resources = Dictionary(Font=Dictionary(F1=font))
+    p2.Annots = Array([field, sq2, typed])
     pdf.Root.AcroForm = Dictionary(Fields=Array([field]), NeedAppearances=True,
                                    DR=Dictionary(Font=Dictionary(Helv=font)),
                                    DA=String("/Helv 0 Tf 0 g"))
@@ -164,7 +173,9 @@ def test_reads_file_annotations():
             assert doc.file_annots(0)[0].author == "alice"
             assert [a.reply_to for a in doc.file_annots(0)] == [None, None, None, 1]
             assert without(doc.file_annots(0), doc.file_annots(0)[0]) == doc.file_annots(0)[1:3],                 "deleting a comment deletes its reply"
-            assert [a.kind for a in doc.file_annots(1)] == ["Square"], "widget excluded"
+            assert [a.kind for a in doc.file_annots(1)] == ["Square", "FreeText"], "widget excluded"
+            typed = doc.file_annots(1)[1]
+            assert typed.font_size == 14 and typed.color == (1, 0, 0) and not typed.boxed
             assert doc.page_annots(0) == doc.file_annots(0), "no edits yet"
 
 
@@ -494,6 +505,97 @@ def test_remarking_whole_line_leaves_no_slivers():
             kept = [a for a in lay_markup(doc.file_annots(0), part, doc.char_boxes(0))
                     if a.ident == old.ident]
             assert len(kept) == 1 and len(kept[0].quads) == 16
+
+
+# ---- text boxes ---------------------------------------------------------------
+
+def test_text_layout():
+    assert abs(text_width("Hello", 10) - 22.78) < 1e-9
+    lay = layout("Hello world, this wraps nicely", 12, 80)
+    assert lay.lines == ("Hello world,", "this wraps", "nicely") and lay.width == 80
+    assert all(text_width(line, 12) <= 80 - 2 * PADDING for line in lay.lines)
+    tw = layout("one\ntwo longer", 10)
+    assert tw.lines == ("one", "two longer")
+    assert abs(tw.width - (text_width("two longer", 10) + 2 * PADDING)) < 1e-9
+    assert layout("Supercalifragilistic", 12, 40).lines[0] != "Supercalifragilistic", "long words split"
+    assert parse_da("/Helv 14 Tf 1 0 0 rg") == (14.0, (1.0, 0.0, 0.0))
+    assert parse_da("0 g /Helv 0 Tf") == (12.0, (0.0, 0.0, 0.0))
+    assert encodable("Café £5 – “quoted”") and not encodable("Привет")
+
+
+def _text_rect(doc, index, x, y, text, size, boxed_width=None):
+    """The rect the view makes for text typed at page point (x, y): the box's
+    on-screen top-left there, sized by layout, through the page transform."""
+    t = doc.transform(index)
+    lay = layout(text, size, boxed_width)
+    wx, wy = t.pdf_to_widget(x, y)
+    return t.widget_rect_to_pdf((wx, wy, wx + lay.width, wy + lay.height))
+
+
+def _freetext_edits(doc):
+    p1 = new_text(_text_rect(doc, 0, 72, 560, "Typed on page one\nsecond line", 12),
+                  "Typed on page one\nsecond line", "t", 12, TEXT_COLORS["Blue"], False, 0)
+    body = "A bordered text box that wraps across several lines of text."
+    p2_box = new_text(_text_rect(doc, 1, 300, 600, body, 10, 150), body, "t", 10,
+                      TEXT_COLORS["Black"], True, 0)
+    typed = doc.file_annots(1)[1]
+    new_words = r"Edited: now longer (with parens) \ and café"
+    edited = replace(typed.with_contents(new_words), reshaped=True,
+                     rect=_text_rect(doc, 1, 72, 420, new_words, 14))
+    rot = doc.page_rotation(2)
+    p3 = new_text(_text_rect(doc, 2, 400, 300, "Upright on a rotated page", 18),
+                  "Upright on a rotated page", "t", 18, TEXT_COLORS["Red"], False, rot)
+    return (doc.annots
+            .with_page(doc.page_key(0), doc.file_annots(0) + (p1,))
+            .with_page(doc.page_key(1), (doc.file_annots(1)[0], edited, p2_box))
+            .with_page(doc.page_key(2), doc.file_annots(2) + (p3,)))
+
+
+def test_text_preview_matches_saved():
+    with tempfile.TemporaryDirectory() as tmp:
+        src, out = Path(tmp, "a.pdf"), Path(tmp, "out.pdf")
+        _make_annotated_pdf(src)
+        with PdfDocument(src) as doc:
+            doc.annots = _freetext_edits(doc)
+            preview = {(i, vr): _render(doc, i, vr, _overlay(doc, i))
+                       for i in range(3) for vr in (0, 90)}
+            commit(write_pdf(doc.sources, doc.pages, out, annots=doc.annots), out)
+        with PdfDocument(out) as saved:
+            for (i, vr), want in preview.items():
+                bad = _differing_pixels(_render(saved, i, vr), want)
+                assert bad == 0, f"page {i + 1} view {vr}: {bad} pixels differ"
+            typed = [a for a in saved.file_annots(1) if a.kind == "FreeText"]
+            assert [a.contents for a in typed][0].startswith("Edited: now longer")
+            assert typed[0].font_size == 14 and typed[0].color == (1, 0, 0), "style kept"
+        with pikepdf.open(out) as pdf:
+            texts = [a for pg in pdf.pages for a in (pg.obj.get("/Annots") or [])
+                     if a.get("/Subtype") == Name.FreeText]
+            tw = next(a for a in texts if str(a.Contents).startswith("Typed on page one"))
+            assert tw.IT == Name("/FreeTextTypeWriter") and str(tw.DA).startswith("/Helv 12 Tf")
+            box = next(a for a in texts if str(a.Contents).startswith("A bordered"))
+            assert "/IT" not in box and float(box.BS.W) == 1
+            rot = next(a for a in texts if str(a.Contents).startswith("Upright"))
+            assert [float(v) for v in rot.AP.N.Matrix] == [0, 1, -1, 0, 0, 0]
+
+
+def test_text_reads_upright_on_rotated_page():
+    """Page 3 has /Rotate 90. Typed text must run left-to-right on screen,
+    not down the page: its ink is much wider than tall as displayed."""
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp, "a.pdf")
+        _make_annotated_pdf(src)
+        with PdfDocument(src) as doc:
+            before = _render(doc, 2, 0, None, scale=1.0)
+            doc.annots = _freetext_edits(doc)
+            w, h, after = _render(doc, 2, 0, _overlay(doc, 2), scale=1.0)
+            xs, ys = [], []
+            for i in range(0, len(after), 4):
+                r, g, b = after[i + 2], after[i + 1], after[i]  # BGRx
+                if r > 150 and g < 80 and b < 80 and after[i:i + 3] != before[2][i:i + 3]:
+                    xs.append((i // 4) % w)
+                    ys.append((i // 4) // w)
+            assert xs, "no red text found"
+            assert max(xs) - min(xs) > 4 * (max(ys) - min(ys)), "text runs vertically"
 
 
 if __name__ == "__main__":

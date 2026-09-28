@@ -10,15 +10,18 @@ with virtualised page slots -- not worth the complexity yet.
 from __future__ import annotations
 
 import getpass
+import math
+from dataclasses import replace
 from enum import Enum
 from typing import List, Optional
 
 from PySide6.QtCore import QPoint, QRect, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen, QWheelEvent
+from PySide6.QtGui import QColor, QFont, QPainter, QPen, QTextCursor, QWheelEvent
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
     QLabel,
+    QPlainTextEdit,
     QScrollArea,
     QSizePolicy,
     QToolTip,
@@ -26,7 +29,19 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .annots import HIGHLIGHT_COLORS, Annot, describe, lay_markup, new_markup, without
+from .annots import (
+    HIGHLIGHT_COLORS,
+    TEXT_BOX_WIDTH,
+    TEXT_COLORS,
+    Annot,
+    describe,
+    lay_markup,
+    new_markup,
+    new_text,
+    text_box_size,
+    without,
+)
+from .textlayout import PADDING, encodable, layout
 from .document import PdfDocument
 from .rendering import PageRenderer
 from .transform import PageTransform, normalize_rotation
@@ -51,11 +66,50 @@ class Tool(Enum):
     HIGHLIGHT = "highlight"
     UNDERLINE = "underline"
     STRIKEOUT = "strikeout"
+    TYPEWRITER = "typewriter"
+    TEXTBOX = "textbox"
 
 
 # Tools that mark text: drag across it, a markup annotation lands on release.
 MARKUP_TOOLS = {Tool.HIGHLIGHT: "Highlight", Tool.UNDERLINE: "Underline",
                 Tool.STRIKEOUT: "StrikeOut"}
+TEXT_TOOLS = (Tool.TYPEWRITER, Tool.TEXTBOX)
+
+
+class _TextEditor(QPlainTextEdit):
+    """The in-place editor for a text box. Finishes on Esc, Ctrl+Enter or
+    losing focus -- clicking anywhere else is how you're done typing."""
+
+    finished = Signal()
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setFrameShape(QFrame.NoFrame)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setTabChangesFocus(True)
+        self._done = False
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key_Escape or (
+                event.key() in (Qt.Key_Return, Qt.Key_Enter)
+                and event.modifiers() & Qt.ControlModifier):
+            self.finish()
+            return
+        super().keyPressEvent(event)
+
+    def focusOutEvent(self, event) -> None:
+        super().focusOutEvent(event)
+        self.finish()
+
+    def finish(self) -> None:
+        if not self._done:
+            self._done = True
+            self.finished.emit()
+
+    def reopen(self) -> None:
+        self._done = False
+        self.setFocus()
 
 
 class PageWidget(QWidget):
@@ -169,6 +223,8 @@ class PdfView(QScrollArea):
     note_requested = Signal(int, float, float) # page index, PDF x, y
     tool_changed = Signal(object)              # Tool
     text_selection_changed = Signal(bool)      # whether any text is selected
+    editing_changed = Signal(bool)             # a text box editor is open
+    message = Signal(str)                      # something the user should know
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -184,6 +240,9 @@ class PdfView(QScrollArea):
         self._drag = None       # in-progress mouse drag, see page_mouse_press
         self._text_sel = None   # (page index, anchor char, focus char)
         self.highlight_color = HIGHLIGHT_COLORS["Yellow"]
+        self.text_size = 12.0
+        self.text_color = TEXT_COLORS["Black"]
+        self._editor = None     # open text box editor, see _open_editor
         self.author = getpass.getuser()  # /T on annotations created here
         self.setFocusPolicy(Qt.StrongFocus)  # Delete and Esc for annotations
 
@@ -225,7 +284,7 @@ class PdfView(QScrollArea):
     def _tool_cursor(self):
         if self._tool is Tool.NOTE:
             return Qt.CrossCursor
-        if self._tool in MARKUP_TOOLS:
+        if self._tool in MARKUP_TOOLS or self._tool in TEXT_TOOLS:
             return Qt.IBeamCursor
         return Qt.ArrowCursor
 
@@ -347,6 +406,13 @@ class PdfView(QScrollArea):
             x, y = page.pdf_point_at(pos)
             self.note_requested.emit(page.index, x, y)
             return True
+        if self._tool in TEXT_TOOLS:
+            hit = self._annot_at(page, pos)
+            if hit is not None and hit.kind == "FreeText":
+                self._edit_text(page, hit)  # the typewriter clicks into existing text
+                return True
+            self._drag = {"mode": "place", "page": page, "press": pos, "end": None}
+            return True
         annot = None if self._tool in MARKUP_TOOLS else self._annot_at(page, pos)
         self.select_annot(page.index, annot.ident if annot else None)
         if annot is not None and not annot.is_markup:
@@ -364,9 +430,15 @@ class PdfView(QScrollArea):
         pos = event.position().toPoint()
         drag = self._drag
         if drag is not None and event.buttons() & Qt.LeftButton and drag["page"] is page:
-            started = drag.get("delta") is not None or drag.get("anchor") is not None
+            started = drag.get("delta") is not None or drag.get("anchor") is not None \
+                or drag.get("end") is not None
             if not started and \
                     (pos - drag["press"]).manhattanLength() < QApplication.startDragDistance():
+                return True
+            if drag["mode"] == "place":
+                if self._tool is Tool.TEXTBOX:
+                    drag["end"] = pos
+                    page.update()
                 return True
             if drag["mode"] == "move":
                 x, y = page.pdf_point_at(pos)
@@ -408,6 +480,21 @@ class PdfView(QScrollArea):
         drag, self._drag = self._drag, None
         if drag is None or event.button() != Qt.LeftButton:
             return False
+        if drag["mode"] == "place":
+            press = drag["press"]
+            if self._tool is Tool.TEXTBOX:
+                scale = page.widget_transform().scale
+                end = drag["end"]
+                if end is not None and abs(end.x() - press.x()) / scale >= 40:
+                    width = abs(end.x() - press.x()) / scale
+                    press = QPoint(min(end.x(), press.x()), press.y())
+                else:
+                    width = TEXT_BOX_WIDTH
+                self._new_text(page, press, boxed=True, width=width)
+            else:
+                self._new_text(page, press, boxed=False, width=None)
+            page.update()
+            return True
         if drag["mode"] == "move":
             if drag["delta"] is not None:
                 dx, dy = drag["delta"]
@@ -428,6 +515,9 @@ class PdfView(QScrollArea):
             return False
         pos = event.position().toPoint()
         annot = self._annot_at(page, pos)
+        if annot is not None and annot.kind == "FreeText":
+            self._edit_text(page, annot)
+            return True
         if annot is not None:
             self.annot_open.emit(page.index, annot)
             return True
@@ -436,6 +526,106 @@ class PdfView(QScrollArea):
             self.set_text_selection(page.index, *self.document.word_at(page.index, char))
             return True
         return False
+
+    # -- text boxes: typed in place, committed as a FreeText annotation
+
+    def is_editing(self) -> bool:
+        return self._editor is not None
+
+    def _new_text(self, page: "PageWidget", pos: QPoint, boxed: bool, width) -> None:
+        self._open_editor(page, pos, None, "", self.text_size, self.text_color, boxed, width)
+
+    def _edit_text(self, page: "PageWidget", annot: Annot) -> None:
+        left, top, _, _ = page.widget_transform().pdf_rect_to_widget(annot.rect)
+        width = text_box_size(annot)[0] if annot.boxed else None
+        self.select_annot(page.index, annot.ident)
+        self._open_editor(page, QPoint(round(left), round(top)), annot, annot.contents,
+                          annot.font_size, annot.color, annot.boxed, width)
+
+    def _open_editor(self, page, anchor: QPoint, annot, text, size, color, boxed, width) -> None:
+        self.commit_text_edit()
+        if self._rotation != 0:
+            # Qt can't draw the editor sideways, and text typed while the view
+            # is turned would come out sideways once it's turned back.
+            self.message.emit("Rotate the view back to normal (Ctrl+L / Ctrl+R) to type text.")
+            return
+        scale = page.widget_transform().scale
+        editor = _TextEditor(page)
+        font = QFont("Arial")  # Helvetica's metric twin: wraps where the PDF will
+        font.setPixelSize(max(1, round(size * scale)))
+        editor.setFont(font)
+        editor.document().setDocumentMargin(PADDING * scale)
+        r, g, b = (round(c * 255) for c in color)
+        editor.setStyleSheet(
+            f"QPlainTextEdit {{ color: rgb({r},{g},{b}); background: rgba(255,255,255,215);"
+            f" border: 1px dashed rgb(40,110,230); }}")
+        editor.setLineWrapMode(QPlainTextEdit.WidgetWidth if boxed else QPlainTextEdit.NoWrap)
+        editor.setPlainText(text)
+        self._editor = {"page": page, "widget": editor, "annot": annot, "anchor": anchor,
+                        "size": size, "color": color, "boxed": boxed, "width": width}
+        editor.textChanged.connect(self._fit_editor)
+        editor.finished.connect(self.commit_text_edit)
+        self._fit_editor()
+        editor.show()
+        editor.setFocus()
+        editor.moveCursor(QTextCursor.End)
+        self.editing_changed.emit(True)
+
+    def _fit_editor(self) -> None:
+        ed = self._editor
+        if ed is None:
+            return
+        scale = ed["page"].widget_transform().scale
+        lay = layout(ed["widget"].toPlainText(), ed["size"], ed["width"] if ed["boxed"] else None)
+        # A little extra room: Qt's line spacing differs slightly from ours,
+        # and the committed box is sized by layout(), not by this widget.
+        ed["widget"].setGeometry(ed["anchor"].x(), ed["anchor"].y(),
+                                 math.ceil(lay.width * scale) + 4,
+                                 math.ceil(lay.height * scale * 1.05) + 4)
+
+    def commit_text_edit(self) -> None:
+        """Close the text editor, turning what was typed into an edit."""
+        ed = self._editor
+        if ed is None:
+            return
+        widget, page = ed["widget"], ed["page"]
+        text = widget.toPlainText().rstrip()
+        if not encodable(text):
+            # Refuse rather than save question marks. The editor stays open.
+            self.message.emit("Only Western European characters can be typed into PDF text "
+                              "boxes for now; please remove the others.")
+            widget.reopen()
+            return
+        self._editor = None
+        widget.hide()
+        widget.deleteLater()
+        self.setFocus(Qt.OtherFocusReason)
+        self.editing_changed.emit(False)
+
+        index = page.index
+        if self.document is None or page.document is not self.document                 or index >= self.document.page_count:
+            return  # the page it was typed on is gone; nothing to attach it to
+        scale = page.widget_transform().scale
+        lay = layout(text, ed["size"], ed["width"] if ed["boxed"] else None)
+        ax, ay = ed["anchor"].x(), ed["anchor"].y()
+        rect = page.widget_transform().widget_rect_to_pdf(
+            (ax, ay, ax + lay.width * scale, ay + lay.height * scale))
+        key = self.document.page_key(index)
+        annots = self.document.page_annots(index)
+        old = ed["annot"]
+        if old is None:
+            if text.strip():
+                new = new_text(rect, text, self.author, ed["size"], ed["color"], ed["boxed"],
+                               self.document.page_rotation(index))
+                self.annots_edit.emit(key, annots + (new,),
+                                      "Add Text Box" if ed["boxed"] else "Add Text")
+                self.select_annot(index, new.ident)
+        elif not text.strip():
+            self.annots_edit.emit(key, without(annots, old), "Delete Text")
+        elif text != old.contents:
+            changed = replace(old, contents=text, rect=rect, edited=True, reshaped=True)
+            self.annots_edit.emit(key, tuple(changed if a.ident == old.ident else a
+                                             for a in annots), "Edit Text")
 
     def delete_selected_annot(self) -> bool:
         found = self.selected_annot()
@@ -462,6 +652,13 @@ class PdfView(QScrollArea):
     def paint_page_chrome(self, page: "PageWidget", painter: QPainter) -> None:
         """Text selection, and the selected annotation's outline and drag
         preview. UI chrome only -- annotations are always drawn by pdfium."""
+        drag = self._drag
+        if drag is not None and drag["mode"] == "place" and drag["page"] is page \
+                and drag["end"] is not None:
+            a, b = drag["press"], drag["end"]
+            painter.setPen(QPen(QColor(40, 110, 230), 1, Qt.DashLine))
+            painter.drawRect(QRect(QPoint(min(a.x(), b.x()), a.y()),
+                                   QPoint(max(a.x(), b.x()), a.y() + 24)))
         if self._text_sel is not None and self._text_sel[0] == page.index:
             _, start, end = self._text_sel
             for rect in self.document.text_rects(page.index, start, end):
@@ -495,6 +692,7 @@ class PdfView(QScrollArea):
         keep_view keeps zoom, view rotation and page position -- for reopening
         the same file after a save, which shouldn't feel like opening it.
         """
+        self.commit_text_edit()
         if self.document is not None:
             self.document.close()
         self.document = document
@@ -519,6 +717,7 @@ class PdfView(QScrollArea):
         """The document's page list was edited. Rebuild, keeping zoom and view."""
         if self.document is None:
             return
+        self.commit_text_edit()
         if self.renderer is not None:
             self.renderer.clear()  # cache is keyed by displayed index, now stale
         self.clear_text_selection()  # indexes a page that may have moved
@@ -578,6 +777,7 @@ class PdfView(QScrollArea):
         scale = max(MIN_SCALE, min(MAX_SCALE, scale))
         if abs(scale - self._scale) < 1e-6 and fit == self._fit:
             return
+        self.commit_text_edit()  # the editor is sized for the old zoom
 
         hbar, vbar = self.horizontalScrollBar(), self.verticalScrollBar()
         if anchor is None:
@@ -666,6 +866,7 @@ class PdfView(QScrollArea):
         """Rotate the *view*. Does not modify the document."""
         if self.document is None:
             return
+        self.commit_text_edit()
         self._rotation = normalize_rotation(self._rotation + delta)
         if self.renderer is not None:
             self.renderer.clear()

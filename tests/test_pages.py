@@ -93,6 +93,25 @@ def test_drop_position():
     assert drop([1, 4], 6) == [0, 2, 3, 5, 1, 4]
 
 
+def test_closed_document_fails_loudly():
+    """pdfium on a closed document is an access violation. It must be a
+    catchable error instead."""
+    from pdfapp.document import DocumentError
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp, "in.pdf")
+        _make_pdf(path)
+        doc = PdfDocument(path)
+        doc.close()
+        for call in (lambda: doc.transform(0), lambda: doc.render_bitmap(0, 1.0),
+                     lambda: doc.char_count(0), lambda: doc.file_annots(0)):
+            try:
+                call()
+            except DocumentError:
+                pass
+            else:
+                raise AssertionError("closed document did not raise")
+
+
 def test_pagelist_refuses_bad_edits():
     p = PageList.identity(3)
     for bad in (lambda: p.deleted([0, 1, 2]), lambda: p.deleted([]),

@@ -12,6 +12,7 @@ import pypdfium2.raw as pdfium_c
 
 from .annots import MARKUP_KINDS, Annot, AnnotEdits, PageKey, is_editable
 from .pagelist import PageList, PageRef
+from .textlayout import parse_da
 from .transform import PageTransform, normalize_rotation
 
 _ANNOT_KINDS = {
@@ -218,6 +219,11 @@ class PdfDocument:
                 rect = pdfium_c.FS_RECTF()
                 if not pdfium_c.FPDFAnnot_GetRect(handle, rect):
                     continue
+                extra = {}
+                if kind == "FreeText":
+                    size, color = parse_da(_annot_string(handle, b"DA"))
+                    extra = dict(font_size=size, color=color, boxed=_border_width(handle) > 0,
+                                 text_rotation=int(page.get_rotation()))
                 found.append(Annot(
                     kind, (rect.left, rect.bottom, rect.right, rect.top),
                     contents=_annot_string(handle, b"Contents"),
@@ -225,6 +231,7 @@ class PdfDocument:
                     origin=i,
                     reply_to=_reply_target(page, handle),
                     quads=_quad_points(handle) if kind in MARKUP_KINDS else (),
+                    **extra,
                 ))
             finally:
                 pdfium_c.FPDFPage_CloseAnnot(handle)
@@ -239,6 +246,8 @@ class PdfDocument:
     # inclusive (start, end) and may come in either order.
 
     def _text(self, index: int) -> _PageText:
+        if self._closed:
+            raise DocumentError("document is closed")
         ref = self._pages[index]
         source = self._sources[ref.file]
         text = source.text_cache.get(ref.source)
@@ -324,6 +333,10 @@ class PdfDocument:
         return self._sources[self._pages[index].file]
 
     def _page(self, index: int) -> pdfium.PdfPage:
+        # pdfium dereferences freed memory on a closed document -- an access
+        # violation, not an exception. Fail loudly and catchably instead.
+        if self._closed:
+            raise DocumentError("document is closed")
         if not 0 <= index < self.page_count:
             raise IndexError(f"page {index} out of range (0..{self.page_count - 1})")
         ref = self._pages[index]
@@ -439,6 +452,13 @@ class PdfDocument:
         if source.has_forms and formenv:
             pdfium_c.FPDF_FFLDraw(formenv, bitmap, page, *placement, pdfium_c.FPDF_ANNOT)
         return bitmap
+
+
+def _border_width(handle) -> float:
+    h, v, w = ctypes.c_float(), ctypes.c_float(), ctypes.c_float()
+    if pdfium_c.FPDFAnnot_GetBorder(handle, h, v, w):
+        return w.value
+    return 0.0
 
 
 def _quad_points(handle) -> Tuple[float, ...]:

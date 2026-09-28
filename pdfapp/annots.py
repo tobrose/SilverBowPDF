@@ -53,7 +53,7 @@ MARKUP_DEFAULT_COLORS = {
 }
 
 KIND_NAMES = {
-    "Text": "Note", "FreeText": "Text Box", "Highlight": "Highlight",
+    "Text": "Note", "FreeText": "Text", "Highlight": "Highlight",
     "Underline": "Underline", "StrikeOut": "Strikeout", "Squiggly": "Squiggle",
     "Square": "Rectangle", "Circle": "Ellipse", "Line": "Line", "Ink": "Drawing",
     "Polygon": "Polygon", "PolyLine": "Polyline", "Stamp": "Stamp", "Caret": "Caret",
@@ -86,8 +86,14 @@ class Annot:
     quads: text markup geometry, flat /QuadPoints order: per rectangle
         upper-left, upper-right, lower-left, lower-right (x, y each).
     reshaped: an existing markup whose quads were cut by a newer mark of
-        the same kind (see lay_markup); the writer rewrites its /QuadPoints
-        and /Rect and draws it a new appearance, keeping everything else.
+        the same kind (see lay_markup), or an existing text box whose text
+        was edited; the writer rewrites its geometry and draws it a new
+        appearance, keeping everything else.
+    font_size, boxed: text boxes (FreeText). boxed False is a typewriter:
+        no border, lines break only at newlines.
+    text_rotation: text boxes: the page's rotation (/Rotate, plus edit
+        rotation) when the text was typed. The appearance counter-rotates
+        by it so the text reads upright as the page is displayed.
     """
 
     kind: str
@@ -102,6 +108,9 @@ class Annot:
     reply_to: Optional[int] = None
     quads: Tuple[float, ...] = ()
     reshaped: bool = False
+    font_size: float = 12.0
+    boxed: bool = False
+    text_rotation: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "rect", normalize_rect(tuple(float(v) for v in self.rect)))
@@ -257,6 +266,25 @@ def lay_markup(annots: Iterable[Annot], new: Annot,
     for gone in covered:
         result = without(result + (gone,), gone)  # takes its replies too
     return result + (new,)
+
+
+TEXT_COLORS = {"Black": (0.0, 0.0, 0.0), "Blue": (0.1, 0.25, 0.8), "Red": (0.8, 0.1, 0.1)}
+TEXT_SIZES = (8, 10, 12, 14, 18, 24)
+TEXT_BOX_WIDTH = 200.0  # points, a Text Box made by a click rather than a drag
+
+
+def text_box_size(annot: Annot) -> Tuple[float, float]:
+    """(width, height) of a text box as read on screen: its Rect, turned
+    back through the page rotation it was typed at."""
+    x0, y0, x1, y1 = annot.rect
+    w, h = x1 - x0, y1 - y0
+    return (w, h) if annot.text_rotation % 180 == 0 else (h, w)
+
+
+def new_text(rect: Rect, contents: str, author: str, size: float,
+             color: Tuple[float, float, float], boxed: bool, rotation: int) -> Annot:
+    return Annot("FreeText", rect, contents=contents, author=author, color=color,
+                 font_size=size, boxed=boxed, text_rotation=rotation, uid=next(_uids))
 
 
 def new_markup(kind: str, rects: Iterable[Rect], author: str,

@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .annots import HIGHLIGHT_COLORS, Annot, DocState, describe, new_note
+from .annots import HIGHLIGHT_COLORS, TEXT_COLORS, TEXT_SIZES, Annot, DocState, describe, new_note
 from .document import DocumentError, PasswordRequired, PdfDocument, SourceInfo
 from .pagelist import History, PageList
 from .pageview import FitMode, PdfView, Tool
@@ -169,10 +169,17 @@ class MainWindow(QMainWindow):
         self.act_tool_strikeout = QAction("Strikethrough", self, shortcut=QKeySequence("S"),
                                           checkable=True,
                                           triggered=lambda: self.view.set_tool(Tool.STRIKEOUT))
+        self.act_tool_typewriter = QAction("Typewriter", self, shortcut=QKeySequence("T"),
+                                           checkable=True,
+                                           triggered=lambda: self.view.set_tool(Tool.TYPEWRITER))
+        self.act_tool_textbox = QAction("Text Box", self, shortcut=QKeySequence("X"),
+                                        checkable=True,
+                                        triggered=lambda: self.view.set_tool(Tool.TEXTBOX))
         self.tool_actions = {
             Tool.SELECT: self.act_tool_select, Tool.NOTE: self.act_tool_note,
             Tool.HIGHLIGHT: self.act_tool_highlight, Tool.UNDERLINE: self.act_tool_underline,
-            Tool.STRIKEOUT: self.act_tool_strikeout,
+            Tool.STRIKEOUT: self.act_tool_strikeout, Tool.TYPEWRITER: self.act_tool_typewriter,
+            Tool.TEXTBOX: self.act_tool_textbox,
         }
         for act in self.tool_actions.values():
             self.tool_group.addAction(act)
@@ -181,6 +188,19 @@ class MainWindow(QMainWindow):
         for name, color in HIGHLIGHT_COLORS.items():
             act = self.highlight_menu.addAction(self._swatch(color), name)
             act.triggered.connect(lambda _=False, c=color: self._set_highlight_color(c))
+
+        self.text_menu = QMenu("Text Style", self)
+        self.text_size_actions = QActionGroup(self)
+        for size in TEXT_SIZES:
+            act = self.text_menu.addAction(f"{size} pt")
+            act.setCheckable(True)
+            act.setChecked(size == 12)
+            self.text_size_actions.addAction(act)
+            act.triggered.connect(lambda _=False, sz=size: self._set_text_style(size=sz))
+        self.text_menu.addSeparator()
+        for name, color in TEXT_COLORS.items():
+            act = self.text_menu.addAction(self._swatch(color), name)
+            act.triggered.connect(lambda _=False, c=color: self._set_text_style(color=c))
 
         self.act_copy = QAction("&Copy", self, shortcut=QKeySequence.Copy, triggered=self.copy_text)
         self.act_copy.setEnabled(False)
@@ -253,7 +273,16 @@ class MainWindow(QMainWindow):
         tools.addWidget(highlight)
         tools.addAction(self.act_tool_underline)
         tools.addAction(self.act_tool_strikeout)
+        tools.addSeparator()
+        typewriter = QToolButton(self)
+        typewriter.setDefaultAction(self.act_tool_typewriter)
+        typewriter.setMenu(self.text_menu)
+        typewriter.setPopupMode(QToolButton.MenuButtonPopup)
+        tools.addWidget(typewriter)
+        tools.addAction(self.act_tool_textbox)
         self.view.tool_changed.connect(self._on_tool_changed)
+        self.view.editing_changed.connect(self._on_editing_changed)
+        self.view.message.connect(lambda text: self.statusBar().showMessage(text, 8000))
         self.view.text_selection_changed.connect(self.act_copy.setEnabled)
 
     def _build_menus(self) -> None:
@@ -278,6 +307,7 @@ class MainWindow(QMainWindow):
         for act in self.tool_actions.values():
             tools_menu.addAction(act)
         tools_menu.addMenu(self.highlight_menu)
+        tools_menu.addMenu(self.text_menu)
 
         view_menu = self.menuBar().addMenu("&View")
         view_menu.addAction(self.act_zoom_in)
@@ -375,6 +405,7 @@ class MainWindow(QMainWindow):
 
     def _confirm_discard(self) -> bool:
         """True if it's OK to drop the current document's unsaved edits."""
+        self.view.commit_text_edit()  # typed text counts as an edit
         if self.history is None or not self.history.dirty:
             return True
         answer = QMessageBox.warning(
@@ -454,6 +485,25 @@ class MainWindow(QMainWindow):
         pixmap = QPixmap(14, 14)
         pixmap.fill(QColor.fromRgbF(*color))
         return QIcon(pixmap)
+
+    def _set_text_style(self, size=None, color=None) -> None:
+        if size is not None:
+            self.view.text_size = float(size)
+        if color is not None:
+            self.view.text_color = color
+            self.act_tool_typewriter.setIcon(self._swatch(color))
+        if self.view.tool not in (Tool.TYPEWRITER, Tool.TEXTBOX):
+            self.view.set_tool(Tool.TYPEWRITER)
+
+    def _on_editing_changed(self, editing: bool) -> None:
+        # While typing into a text box, letters must reach the editor: the
+        # single-key tool shortcuts (T, H, S...) and Ctrl+Z/A/C belong to it.
+        for act in (*self.tool_actions.values(), self.act_undo, self.act_redo,
+                    self.act_select_all, self.act_copy, self.act_delete_annot):
+            act.setEnabled(not editing)
+        if not editing:
+            self._refresh_edit_state()
+            self.act_copy.setEnabled(bool(self.view.selected_text()))
 
     def _set_highlight_color(self, color) -> None:
         self.view.highlight_color = color
@@ -692,10 +742,12 @@ class MainWindow(QMainWindow):
     # ---- saving --------------------------------------------------------
 
     def save(self) -> bool:
+        self.view.commit_text_edit()
         doc = self.view.document
         return doc is not None and self._save_to(doc.path)
 
     def save_as(self) -> bool:
+        self.view.commit_text_edit()
         doc = self.view.document
         if doc is None:
             return False

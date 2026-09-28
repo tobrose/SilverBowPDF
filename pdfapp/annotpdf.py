@@ -23,7 +23,8 @@ from typing import Iterable, List, Optional, Sequence, Tuple
 import pikepdf
 from pikepdf import Array, Dictionary, Name, String
 
-from .annots import MARKUP_DEFAULT_COLORS, NOTE_SIZE, Annot, is_editable
+from .annots import MARKUP_DEFAULT_COLORS, NOTE_SIZE, Annot, is_editable, text_box_size
+from .textlayout import ASCENT, LEADING, PADDING, layout
 
 
 def pdf_date(t: Optional[float] = None) -> str:
@@ -103,6 +104,66 @@ def _markup_appearance(pdf: pikepdf.Pdf, annot: Annot) -> pikepdf.Stream:
     return stream
 
 
+# Rotating the appearance counter to the page: a page shown rotated 90 degrees
+# clockwise needs its text drawn 90 degrees anticlockwise to read upright.
+_COUNTER_ROTATION = {0: [1, 0, 0, 1, 0, 0], 90: [0, 1, -1, 0, 0, 0],
+                     180: [-1, 0, 0, -1, 0, 0], 270: [0, -1, 1, 0, 0, 0]}
+
+
+def _pdf_literal(text: str) -> bytes:
+    raw = text.encode("cp1252")  # callers check textlayout.encodable first
+    return b"(" + raw.replace(b"\\", b"\\\\").replace(b"(", b"\\(").replace(b")", b"\\)") + b")"
+
+
+def _freetext_appearance(pdf: pikepdf.Pdf, annot: Annot) -> pikepdf.Stream:
+    """Drawn upright in its own w x h box; /Matrix turns it to match the page."""
+    w, h = text_box_size(annot)
+    size = annot.font_size
+    lines = layout(annot.contents, size, w if annot.boxed else None).lines
+    ops = [b"q"]
+    if annot.boxed:
+        ops.append(f"{_rgb(annot.color)} RG 1 w 0.5 0.5 {w - 1:.3f} {h - 1:.3f} re S".encode())
+    # Clip to the box: text can never spill outside what hit-testing and
+    # selection think the annotation is.
+    ops.append(f"0 0 {w:.3f} {h:.3f} re W n BT /Helv {size:g} Tf {_rgb(annot.color)} rg".encode())
+    y = h - PADDING - size * ASCENT
+    for line in lines:
+        ops.append(f"1 0 0 1 {PADDING:g} {y:.3f} Tm ".encode() + _pdf_literal(line) + b" Tj")
+        y -= size * LEADING
+    ops.append(b"ET Q")
+    stream = pdf.make_stream(b" ".join(ops))
+    stream.Type = Name.XObject
+    stream.Subtype = Name.Form
+    stream.BBox = Array([0, 0, w, h])
+    stream.Matrix = Array(_COUNTER_ROTATION[annot.text_rotation % 360])
+    stream.Resources = Dictionary(Font=Dictionary(Helv=_helvetica(pdf)))
+    return stream
+
+
+def _helvetica(pdf: pikepdf.Pdf) -> pikepdf.Object:
+    return pdf.make_indirect(Dictionary(Type=Name.Font, Subtype=Name.Type1,
+                                        BaseFont=Name.Helvetica, Encoding=Name.WinAnsiEncoding))
+
+
+def _freetext_fields(d: Dictionary, annot: Annot) -> None:
+    """The keys other editors (Acrobat) read to re-edit the text natively."""
+    rgb = _rgb(annot.color)
+    hex_color = "".join(f"{round(max(0.0, min(1.0, c)) * 255):02x}" for c in annot.color)
+    d.DA = String(f"/Helv {annot.font_size:g} Tf {rgb} rg")
+    d.DS = String(f"font: Helvetica,sans-serif {annot.font_size:g}pt; color: #{hex_color}")
+    d.BS = Dictionary(W=1 if annot.boxed else 0)
+    d.Border = Array([0, 0, 1 if annot.boxed else 0])
+    if annot.boxed:
+        if "/IT" in d:
+            del d["/IT"]
+    else:
+        d.IT = Name("/FreeTextTypeWriter")
+    if "/RC" in d:
+        del d["/RC"]  # rich text would override the plain text we just wrote
+    d.Contents = String(annot.contents)
+    d.Rect = Array(list(annot.rect))
+
+
 def build_annot(pdf: pikepdf.Pdf, annot: Annot) -> pikepdf.Object:
     """A new annotation dictionary (indirect) for an Annot created here."""
     now = pdf_date()
@@ -119,6 +180,17 @@ def build_annot(pdf: pikepdf.Pdf, annot: Annot) -> pikepdf.Object:
             F=4,  # Print
         )
         d.AP = Dictionary(N=_markup_appearance(pdf, annot))
+        return pdf.make_indirect(d)
+    if annot.kind == "FreeText":
+        d = Dictionary(
+            Type=Name.Annot, Subtype=Name.FreeText,
+            T=String(annot.author),
+            NM=String(f"butterpdf-{uuid.uuid4()}"),
+            M=String(now), CreationDate=String(now),
+            F=4,  # Print
+        )
+        _freetext_fields(d, annot)
+        d.AP = Dictionary(N=_freetext_appearance(pdf, annot))
         return pdf.make_indirect(d)
     if annot.kind == "Text":
         d = Dictionary(
@@ -229,7 +301,10 @@ def apply_edits(pdf: pikepdf.Pdf, page_obj: Dictionary, annots: Sequence[Annot])
                 translate(d, *a.offset)
             if a.edited:
                 d.Contents = String(a.contents)
-            if a.reshaped:
+            if a.reshaped and a.kind == "FreeText":
+                _freetext_fields(d, a)
+                d.AP = Dictionary(N=_freetext_appearance(pdf, a))
+            elif a.reshaped:
                 _reshape_markup(pdf, d, a)
             if a.offset != (0.0, 0.0) or a.edited or a.reshaped:
                 now = now or pdf_date()

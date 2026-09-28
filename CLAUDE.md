@@ -29,6 +29,7 @@ pdfapp/
   annots.py      Annotation edits as data (Annot, AnnotEdits, DocState). No libs.
   annotpdf.py    Annotation edits -> PDF (pikepdf): apply_edits, new-annot APs,
                  overlay_pdf for the live preview.
+  textlayout.py  Helvetica metrics, wrapping, DA parsing for text boxes. No libs.
   document.py    pypdfium2 wrapper. NO Qt imports -- must stay headless-testable.
                  Takes *displayed* indices; maps them through its PageList to a
                  page of one of its sources. Sources are only ever added.
@@ -116,6 +117,11 @@ window. Follow that pattern: isolate, display, don't hide.
 
 ## Conventions
 
+- A closed PdfDocument raises DocumentError; never let pdfium see one (it's
+  an access violation, not an exception).
+- UI smoke tests: QTest.keyClicks aborts the process on non-ASCII text;
+  use insertPlainText for those.
+
 - Type hints on public functions. `from __future__ import annotations` at the top.
 - Comments explain *why*, especially where something looks wrong but isn't
   (the two-transform HiDPI split, the `.copy()` in `bitmap_to_qimage`, ceil in
@@ -151,7 +157,17 @@ back older marks of the same kind on the same text (`lay_markup`) -- split,
 or removed with the comment carried over -- so highlights never stack and
 darken. Existing file markups get reshaped (new /QuadPoints + regenerated AP).
 
-Next, in order (user chose all of these): text boxes / typewriter; shapes, ink, stamps;
+Annotations stage 3: Typewriter T (no border, breaks only at Enter) and
+Text Box X (bordered, wraps; click = 200pt wide, drag = chosen width),
+typed in place in a QPlainTextEdit over the page; size/colour presets; the
+typewriter clicks into existing text to edit it; double-click edits any
+FreeText (other apps' too, restyled in Helvetica keeping size/colour).
+Helvetica/WinAnsi only: non-cp1252 text is refused, never saved as '?'.
+Text reads upright on rotated pages (AP /Matrix counter-rotates by the page
+rotation at typing time); typing is blocked while the *view* is rotated.
+Single-key tool shortcuts are disabled while the editor is open.
+
+Next, in order (user chose all of these): shapes, ink, stamps;
 authoring fillable form fields; form filling; encryption; OCR for scanned
 pages (user confirmed it's required; engine not chosen -- weigh machine-image
 size/CPU/Windows Server support and ask before adding a dependency).
