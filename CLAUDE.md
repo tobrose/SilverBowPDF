@@ -168,6 +168,10 @@ rotation at typing time); typing is blocked while the *view* is rotated.
 Single-key tool shortcuts are disabled while the editor is open. Finishing
 (click away, Esc, Ctrl+Enter) also returns to the Select tool, and the
 click-away does nothing else (user's request: no accidental new boxes).
+Resize (Select tool): edges/corners of text boxes show resize cursors;
+width re-wraps, height is clamped so text is never cut off. `fixed_width`
+(wraps) is separate from `boxed` (border): resizing typewriter text gives
+it a width. Only while the text reads upright on screen.
 
 Next, in order (user chose all of these): shapes, ink, stamps;
 authoring fillable form fields; form filling; encryption; OCR for scanned

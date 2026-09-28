@@ -223,6 +223,7 @@ class PdfDocument:
                 if kind == "FreeText":
                     size, color = parse_da(_annot_string(handle, b"DA"))
                     extra = dict(font_size=size, color=color, boxed=_border_width(handle) > 0,
+                                 fixed_width=True,  # respect the width it was given
                                  text_rotation=int(page.get_rotation()))
                 found.append(Annot(
                     kind, (rect.left, rect.bottom, rect.right, rect.top),

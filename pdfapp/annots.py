@@ -89,8 +89,10 @@ class Annot:
         the same kind (see lay_markup), or an existing text box whose text
         was edited; the writer rewrites its geometry and draws it a new
         appearance, keeping everything else.
-    font_size, boxed: text boxes (FreeText). boxed False is a typewriter:
-        no border, lines break only at newlines.
+    font_size, boxed: text boxes (FreeText). boxed draws a border.
+    fixed_width: the text wraps to the box's width. Text boxes start with
+        one; typewriter text (width = its longest line) gets one when the
+        user resizes it. Text boxes from other apps always have one.
     text_rotation: text boxes: the page's rotation (/Rotate, plus edit
         rotation) when the text was typed. The appearance counter-rotates
         by it so the text reads upright as the page is displayed.
@@ -110,6 +112,7 @@ class Annot:
     reshaped: bool = False
     font_size: float = 12.0
     boxed: bool = False
+    fixed_width: bool = False
     text_rotation: int = 0
 
     def __post_init__(self) -> None:
@@ -284,7 +287,8 @@ def text_box_size(annot: Annot) -> Tuple[float, float]:
 def new_text(rect: Rect, contents: str, author: str, size: float,
              color: Tuple[float, float, float], boxed: bool, rotation: int) -> Annot:
     return Annot("FreeText", rect, contents=contents, author=author, color=color,
-                 font_size=size, boxed=boxed, text_rotation=rotation, uid=next(_uids))
+                 font_size=size, boxed=boxed, fixed_width=boxed, text_rotation=rotation,
+                 uid=next(_uids))
 
 
 def new_markup(kind: str, rects: Iterable[Rect], author: str,

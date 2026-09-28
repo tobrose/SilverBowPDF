@@ -75,6 +75,12 @@ MARKUP_TOOLS = {Tool.HIGHLIGHT: "Highlight", Tool.UNDERLINE: "Underline",
                 Tool.STRIKEOUT: "StrikeOut"}
 TEXT_TOOLS = (Tool.TYPEWRITER, Tool.TEXTBOX)
 
+_EDGE_CURSORS = {
+    "l": Qt.SizeHorCursor, "r": Qt.SizeHorCursor, "t": Qt.SizeVerCursor, "b": Qt.SizeVerCursor,
+    "lt": Qt.SizeFDiagCursor, "rb": Qt.SizeFDiagCursor, "rt": Qt.SizeBDiagCursor,
+    "lb": Qt.SizeBDiagCursor,
+}
+
 
 class _TextEditor(QPlainTextEdit):
     """The in-place editor for a text box. Finishes on Esc, Ctrl+Enter or
@@ -419,6 +425,15 @@ class PdfView(QScrollArea):
                 return True
             self._drag = {"mode": "place", "page": page, "press": pos, "end": None}
             return True
+        edge = self._resize_hit(page, pos) if self._tool is Tool.SELECT else None
+        if edge is not None:
+            annot, edges = edge
+            self.select_annot(page.index, annot.ident)
+            self.clear_text_selection()
+            left, top, right, bottom = page.widget_transform().pdf_rect_to_widget(annot.rect)
+            self._drag = {"mode": "resize", "page": page, "annot": annot, "edges": edges,
+                          "press": pos, "start": (left, top, right, bottom), "rect": None}
+            return True
         annot = None if self._tool in MARKUP_TOOLS else self._annot_at(page, pos)
         self.select_annot(page.index, annot.ident if annot else None)
         if annot is not None and not annot.is_markup:
@@ -437,9 +452,13 @@ class PdfView(QScrollArea):
         drag = self._drag
         if drag is not None and event.buttons() & Qt.LeftButton and drag["page"] is page:
             started = drag.get("delta") is not None or drag.get("anchor") is not None \
-                or drag.get("end") is not None
+                or drag.get("end") is not None or drag.get("rect") is not None
             if not started and \
                     (pos - drag["press"]).manhattanLength() < QApplication.startDragDistance():
+                return True
+            if drag["mode"] == "resize":
+                drag["rect"] = self._resized_rect(page, drag, pos)
+                page.update()
                 return True
             if drag["mode"] == "place":
                 if self._tool is Tool.TEXTBOX:
@@ -469,6 +488,11 @@ class PdfView(QScrollArea):
     def _hover(self, page: "PageWidget", pos: QPoint, event) -> None:
         if self._tool is not Tool.SELECT:
             return
+        edge = self._resize_hit(page, pos)
+        if edge is not None:
+            page.setCursor(_EDGE_CURSORS[edge[1]])
+            QToolTip.hideText()
+            return
         annot = self._annot_at(page, pos)
         if annot is not None and not annot.is_markup:
             page.setCursor(Qt.SizeAllCursor)
@@ -486,6 +510,18 @@ class PdfView(QScrollArea):
         drag, self._drag = self._drag, None
         if drag is None or event.button() != Qt.LeftButton:
             return False
+        if drag["mode"] == "resize":
+            if drag["rect"] is not None:
+                old = drag["annot"]
+                left, top, right, bottom = drag["rect"]
+                rect = page.widget_transform().widget_rect_to_pdf((left, top, right, bottom))
+                resized = replace(old, rect=rect, fixed_width=True, reshaped=True)
+                self.annots_edit.emit(self.document.page_key(page.index),
+                                      tuple(resized if a.ident == old.ident else a
+                                            for a in self.document.page_annots(page.index)),
+                                      f"Resize {describe(old.kind)}")
+            page.update()
+            return True
         if drag["mode"] == "place":
             press = drag["press"]
             if self._tool is Tool.TEXTBOX:
@@ -533,6 +569,68 @@ class PdfView(QScrollArea):
             return True
         return False
 
+    # -- resizing text boxes (in widget space; see _resize_hit for when)
+
+    def _resize_hit(self, page: "PageWidget", pos: QPoint):
+        """(annot, edges) if `pos` is on a resizable edge, else None.
+
+        Only text boxes that read upright on screen: with the view or the
+        page turned since typing, "drag the right edge wider" would change
+        the text's height instead, which is just confusing.
+        """
+        if self._rotation != 0 or self.document is None:
+            return None
+        grip = 5  # screen px either side of an edge
+        x, y = pos.x(), pos.y()
+        page_rotation = self.document.page_rotation(page.index)
+        for annot in reversed(self.document.page_annots(page.index)):
+            if annot.kind != "FreeText" or annot.text_rotation != page_rotation:
+                continue
+            left, top, right, bottom = page.widget_transform().pdf_rect_to_widget(annot.rect)
+            if not (left - grip <= x <= right + grip and top - grip <= y <= bottom + grip):
+                continue
+            edges = ""
+            if abs(x - left) <= grip:
+                edges += "l"
+            elif abs(x - right) <= grip:
+                edges += "r"
+            if abs(y - top) <= grip:
+                edges += "t"
+            elif abs(y - bottom) <= grip:
+                edges += "b"
+            if edges:
+                return annot, edges
+        return None
+
+    def _resized_rect(self, page: "PageWidget", drag, pos: QPoint):
+        """The dragged box in widget px, never narrower than a character or
+        shorter than its text needs at that width -- text is never cut off."""
+        annot, edges = drag["annot"], drag["edges"]
+        left, top, right, bottom = drag["start"]
+        dx, dy = pos.x() - drag["press"].x(), pos.y() - drag["press"].y()
+        if "l" in edges:
+            left += dx
+        if "r" in edges:
+            right += dx
+        if "t" in edges:
+            top += dy
+        if "b" in edges:
+            bottom += dy
+        scale = page.widget_transform().scale
+        min_width = (annot.font_size + 2 * PADDING) * scale
+        if right - left < min_width:
+            if "l" in edges:
+                left = right - min_width
+            else:
+                right = left + min_width
+        needed = layout(annot.contents, annot.font_size, (right - left) / scale).height * scale
+        if bottom - top < needed:
+            if "t" in edges:
+                top = bottom - needed
+            else:
+                bottom = top + needed
+        return left, top, right, bottom
+
     # -- text boxes: typed in place, committed as a FreeText annotation
 
     def is_editing(self) -> bool:
@@ -543,7 +641,7 @@ class PdfView(QScrollArea):
 
     def _edit_text(self, page: "PageWidget", annot: Annot) -> None:
         left, top, _, _ = page.widget_transform().pdf_rect_to_widget(annot.rect)
-        width = text_box_size(annot)[0] if annot.boxed else None
+        width = text_box_size(annot)[0] if annot.fixed_width else None
         self.select_annot(page.index, annot.ident)
         self._open_editor(page, QPoint(round(left), round(top)), annot, annot.contents,
                           annot.font_size, annot.color, annot.boxed, width)
@@ -565,7 +663,8 @@ class PdfView(QScrollArea):
         editor.setStyleSheet(
             f"QPlainTextEdit {{ color: rgb({r},{g},{b}); background: rgba(255,255,255,215);"
             f" border: 1px dashed rgb(40,110,230); }}")
-        editor.setLineWrapMode(QPlainTextEdit.WidgetWidth if boxed else QPlainTextEdit.NoWrap)
+        editor.setLineWrapMode(
+            QPlainTextEdit.WidgetWidth if width is not None else QPlainTextEdit.NoWrap)
         editor.setPlainText(text)
         self._editor = {"page": page, "widget": editor, "annot": annot, "anchor": anchor,
                         "size": size, "color": color, "boxed": boxed, "width": width}
@@ -582,7 +681,7 @@ class PdfView(QScrollArea):
         if ed is None:
             return
         scale = ed["page"].widget_transform().scale
-        lay = layout(ed["widget"].toPlainText(), ed["size"], ed["width"] if ed["boxed"] else None)
+        lay = layout(ed["widget"].toPlainText(), ed["size"], ed["width"])
         # A little extra room: Qt's line spacing differs slightly from ours,
         # and the committed box is sized by layout(), not by this widget.
         ed["widget"].setGeometry(ed["anchor"].x(), ed["anchor"].y(),
@@ -617,7 +716,7 @@ class PdfView(QScrollArea):
         if self.document is None or page.document is not self.document                 or index >= self.document.page_count:
             return  # the page it was typed on is gone; nothing to attach it to
         scale = page.widget_transform().scale
-        lay = layout(text, ed["size"], ed["width"] if ed["boxed"] else None)
+        lay = layout(text, ed["size"], ed["width"])
         ax, ay = ed["anchor"].x(), ed["anchor"].y()
         rect = page.widget_transform().widget_rect_to_pdf(
             (ax, ay, ax + lay.width * scale, ay + lay.height * scale))
@@ -664,6 +763,13 @@ class PdfView(QScrollArea):
         """Text selection, and the selected annotation's outline and drag
         preview. UI chrome only -- annotations are always drawn by pdfium."""
         drag = self._drag
+        if drag is not None and drag["mode"] == "resize" and drag["page"] is page \
+                and drag["rect"] is not None:
+            left, top, right, bottom = drag["rect"]
+            box = QRectF(left, top, right - left, bottom - top)
+            painter.fillRect(box, QColor(40, 110, 230, 30))
+            painter.setPen(QPen(QColor(40, 110, 230), 1.5, Qt.DashLine))
+            painter.drawRect(box)
         if drag is not None and drag["mode"] == "place" and drag["page"] is page \
                 and drag["end"] is not None:
             a, b = drag["press"], drag["end"]

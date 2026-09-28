@@ -119,7 +119,7 @@ def _freetext_appearance(pdf: pikepdf.Pdf, annot: Annot) -> pikepdf.Stream:
     """Drawn upright in its own w x h box; /Matrix turns it to match the page."""
     w, h = text_box_size(annot)
     size = annot.font_size
-    lines = layout(annot.contents, size, w if annot.boxed else None).lines
+    lines = layout(annot.contents, size, w if annot.fixed_width else None).lines
     ops = [b"q"]
     if annot.boxed:
         ops.append(f"{_rgb(annot.color)} RG 1 w 0.5 0.5 {w - 1:.3f} {h - 1:.3f} re S".encode())

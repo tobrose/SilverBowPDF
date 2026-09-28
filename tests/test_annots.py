@@ -578,6 +578,38 @@ def test_text_preview_matches_saved():
             assert [float(v) for v in rot.AP.N.Matrix] == [0, 1, -1, 0, 0, 0]
 
 
+def test_resized_text_wraps_and_saves_as_previewed():
+    """Narrowing typewriter text gives it a width: it wraps, grows taller,
+    keeps no border. Widening a file's text box re-wraps it. Both save as
+    previewed."""
+    with tempfile.TemporaryDirectory() as tmp:
+        src, out = Path(tmp, "a.pdf"), Path(tmp, "out.pdf")
+        _make_annotated_pdf(src)
+        with PdfDocument(src) as doc:
+            words = "A typewriter line long enough to need wrapping once narrowed"
+            tw = new_text(_text_rect(doc, 0, 72, 560, words, 12), words, "t", 12,
+                          TEXT_COLORS["Black"], False, 0)
+            assert not tw.fixed_width and not tw.boxed
+            narrow = layout(words, 12, 120)
+            x0, _, _, y1 = tw.rect
+            resized = replace(tw, rect=(x0, y1 - narrow.height, x0 + 120, y1), fixed_width=True)
+            assert len(narrow.lines) >= 3
+            typed = doc.file_annots(1)[1]
+            wide = replace(typed, rect=(72, 380, 400, 420), fixed_width=True, reshaped=True)
+            doc.annots = (doc.annots.with_page(doc.page_key(0), doc.file_annots(0) + (resized,))
+                          .with_page(doc.page_key(1), (doc.file_annots(1)[0], wide)))
+            preview = [_render(doc, i, 0, _overlay(doc, i)) for i in (0, 1)]
+            commit(write_pdf(doc.sources, doc.pages, out, annots=doc.annots), out)
+        with PdfDocument(out) as saved:
+            for n, i in enumerate((0, 1)):
+                assert _differing_pixels(_render(saved, i), preview[n]) == 0, f"page {i + 1}"
+            got = next(a for a in saved.file_annots(0) if a.contents == words)
+            assert abs((got.rect[2] - got.rect[0]) - 120) < 0.01 and not got.boxed
+        with pikepdf.open(out) as pdf:
+            ops = pdf.pages[0].obj.Annots[-1].AP.N.read_bytes()
+            assert ops.count(b" Tj") == len(narrow.lines), "wrapped into the narrowed width"
+
+
 def test_text_reads_upright_on_rotated_page():
     """Page 3 has /Rotate 90. Typed text must run left-to-right on screen,
     not down the page: its ink is much wider than tall as displayed."""
