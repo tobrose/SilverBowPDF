@@ -22,7 +22,9 @@ from pikepdf import Array, Dictionary, Name, String  # noqa: E402
 from pdfapp.annotpdf import overlay_pdf  # noqa: E402
 from dataclasses import replace  # noqa: E402
 
-from pdfapp.annots import TEXT_COLORS, _quad_boxes, new_text  # noqa: E402
+from pdfapp.annots import (  # noqa: E402
+    SHAPE_COLORS, STAMPS, TEXT_COLORS, _quad_boxes, new_ink, new_line, new_shape, new_stamp,
+    new_text)
 from pdfapp.textlayout import PADDING, encodable, layout, parse_da, text_width  # noqa: E402
 from pdfapp.annots import (  # noqa: E402
     HIGHLIGHT_COLORS, AnnotEdits, DocState, lay_markup, new_markup, new_note, without)
@@ -628,6 +630,118 @@ def test_text_reads_upright_on_rotated_page():
                     ys.append((i // 4) // w)
             assert xs, "no red text found"
             assert max(xs) - min(xs) > 4 * (max(ys) - min(ys)), "text runs vertically"
+
+
+# ---- shapes, lines, ink, stamps -------------------------------------------------
+
+def _zigzag(x, y, n=12, step=12.0, amp=15.0):
+    pts = []
+    for i in range(n):
+        pts += [x + i * step, y + (amp if i % 2 else -amp)]
+    return tuple(pts)
+
+
+def _shape_edits(doc):
+    red, blue, green = SHAPE_COLORS["Red"], SHAPE_COLORS["Blue"], SHAPE_COLORS["Green"]
+    square = next(a for a in doc.file_annots(0) if a.kind == "Square")
+    resized = replace(square, rect=(100, 250, 300, 420), reshaped=True)
+    p1 = [a for a in doc.file_annots(0) if a is not square] + [
+        resized,
+        new_shape("Square", (330, 420, 450, 500), "t", blue, 2),
+        new_shape("Circle", (330, 320, 500, 400), "t", green, 4),
+        new_line(80, 200, 300, 120, "t", red, 2, arrow=False),
+        new_line(320, 120, 520, 220, "t", blue, 3, arrow=True),
+        new_ink(_zigzag(80, 80), "t", red, 3),
+        new_stamp("APPROVED", "t, 2026-09-28", 450, 620, "t", STAMPS[0][1], 0, "Approved"),
+    ]
+    rot = doc.page_rotation(2)
+    p3 = list(doc.file_annots(2)) + [
+        new_stamp("CONFIDENTIAL", "", 300, 450, "t", STAMPS[4][1], rot, "Confidential"),
+        new_line(100, 300, 250, 350, "t", green, 2, arrow=True),
+        new_shape("Circle", (400, 100, 520, 180), "t", blue, 2),
+    ]
+    return (doc.annots.with_page(doc.page_key(0), p1).with_page(doc.page_key(2), p3))
+
+
+def test_shapes_preview_matches_saved():
+    with tempfile.TemporaryDirectory() as tmp:
+        src, out = Path(tmp, "a.pdf"), Path(tmp, "out.pdf")
+        _make_annotated_pdf(src)
+        with PdfDocument(src) as doc:
+            doc.annots = _shape_edits(doc)
+            preview = {(i, vr): _render(doc, i, vr, _overlay(doc, i))
+                       for i in (0, 2) for vr in (0, 90)}
+            commit(write_pdf(doc.sources, doc.pages, out, annots=doc.annots), out)
+        with PdfDocument(out) as saved:
+            for (i, vr), want in preview.items():
+                bad = _differing_pixels(_render(saved, i, vr), want)
+                assert bad == 0, f"page {i + 1} view {vr}: {bad} pixels differ"
+            kinds = [a.kind for a in saved.file_annots(0)]
+            for kind in ("Square", "Circle", "Line", "Ink", "Stamp"):
+                assert kind in kinds, kind
+            line = next(a for a in saved.file_annots(0) if a.kind == "Line")
+            assert [round(v) for v in line.line] == [80, 200, 300, 120] and line.width == 2
+            ink = next(a for a in saved.file_annots(0) if a.kind == "Ink")
+            assert [round(v) for v in ink.ink[0]] == [round(v) for v in _zigzag(80, 80)]
+        with pikepdf.open(out) as pdf:
+            annots = list(pdf.pages[0].obj.Annots)
+            arrow = [a for a in annots if a.get("/Subtype") == Name.Line][-1]
+            assert list(arrow.LE) == [Name("/None"), Name.OpenArrow]
+            stamp = next(a for a in annots if a.get("/Subtype") == Name.Stamp)
+            assert stamp.Name == Name("/Approved") and "APPROVED" in str(stamp.Contents)
+            old_square = next(a for a in annots if a.get("/Subtype") == Name.Square
+                              and "/NM" not in a)
+            assert [float(v) for v in old_square.Rect] == [100, 250, 300, 420], "resized in place"
+
+
+def test_stamp_reads_upright_on_rotated_page():
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp, "a.pdf")
+        _make_annotated_pdf(src)
+        with PdfDocument(src) as doc:
+            rot = doc.page_rotation(2)
+            stamp = new_stamp("CONFIDENTIAL", "", 300, 450, "t", (1.0, 0.0, 0.0), rot, "Confidential")
+            before = _render(doc, 2, 0, None, scale=1.0)
+            doc.annots = doc.annots.with_page(doc.page_key(2), doc.file_annots(2) + (stamp,))
+            w, h, after = _render(doc, 2, 0, _overlay(doc, 2), scale=1.0)
+            xs, ys = [], []
+            for i in range(0, len(after), 4):
+                if after[i + 2] > 150 and after[i + 1] < 80 and after[i] < 80 \
+                        and after[i:i + 3] != before[2][i:i + 3]:
+                    xs.append((i // 4) % w)
+                    ys.append((i // 4) // w)
+            assert xs and max(xs) - min(xs) > 3 * (max(ys) - min(ys)), "stamp not upright"
+
+
+def test_line_and_ink_hit_testing():
+    line = new_line(0, 0, 100, 100, "t", (0, 0, 0), 2, arrow=False)
+    assert line.contains(50, 51, 2) and not line.contains(90, 10, 2), "near the stroke only"
+    ink = new_ink((0, 0, 50, 0, 50, 50), "t", (0, 0, 0), 2)
+    assert ink.contains(50, 25, 2) and not ink.contains(10, 40, 2)
+    moved = line.moved(10, 5)
+    assert moved.line == (10, 5, 110, 105) and moved.contains(60, 56, 2)
+
+
+def test_moving_saved_line_and_ink():
+    """Lines and ink from a file move with their geometry (/L, /InkList)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        src, mid, out = Path(tmp, "a.pdf"), Path(tmp, "mid.pdf"), Path(tmp, "out.pdf")
+        _make_annotated_pdf(src)
+        with PdfDocument(src) as doc:
+            doc.annots = _shape_edits(doc)
+            commit(write_pdf(doc.sources, doc.pages, mid, annots=doc.annots), mid)
+        with PdfDocument(mid) as doc:
+            moved = tuple(a.moved(20, -10) if a.kind in ("Line", "Ink") else a
+                          for a in doc.file_annots(0))
+            doc.annots = doc.annots.with_page(doc.page_key(0), moved)
+            preview = _render(doc, 0, 0, _overlay(doc, 0))
+            commit(write_pdf(doc.sources, doc.pages, out, annots=doc.annots), out)
+        with PdfDocument(out) as saved:
+            assert _differing_pixels(_render(saved, 0), preview) == 0
+            line = next(a for a in saved.file_annots(0) if a.kind == "Line")
+            assert [round(v) for v in line.line] == [100, 190, 320, 110]
+            ink = next(a for a in saved.file_annots(0) if a.kind == "Ink")
+            assert [round(v) for v in ink.ink[0][:2]] == [100, 55]
 
 
 if __name__ == "__main__":

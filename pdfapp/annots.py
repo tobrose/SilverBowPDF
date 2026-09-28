@@ -26,6 +26,7 @@ from dataclasses import dataclass, field, replace
 from typing import Dict, Iterable, Optional, Tuple
 
 from .pagelist import PageList
+from .textlayout import bold_text_width, text_width
 from .transform import Rect, normalize_rect
 
 PageKey = Tuple[int, int]  # (file, source page)
@@ -57,6 +58,7 @@ KIND_NAMES = {
     "Underline": "Underline", "StrikeOut": "Strikeout", "Squiggly": "Squiggle",
     "Square": "Rectangle", "Circle": "Ellipse", "Line": "Line", "Ink": "Drawing",
     "Polygon": "Polygon", "PolyLine": "Polyline", "Stamp": "Stamp", "Caret": "Caret",
+    "Arrow": "Arrow",
     "FileAttachment": "Attachment",
 }
 
@@ -69,6 +71,10 @@ def is_editable(kind: str, flags: int) -> bool:
 
 def describe(kind: str) -> str:
     return KIND_NAMES.get(kind, "Annotation")
+
+
+def describe_annot(annot: "Annot") -> str:
+    return "Arrow" if annot.kind == "Line" and annot.arrow else describe(annot.kind)
 
 
 @dataclass(frozen=True)
@@ -93,9 +99,14 @@ class Annot:
     fixed_width: the text wraps to the box's width. Text boxes start with
         one; typewriter text (width = its longest line) gets one when the
         user resizes it. Text boxes from other apps always have one.
-    text_rotation: text boxes: the page's rotation (/Rotate, plus edit
-        rotation) when the text was typed. The appearance counter-rotates
-        by it so the text reads upright as the page is displayed.
+    text_rotation: text boxes and stamps: the page's rotation (/Rotate,
+        plus edit rotation) when made. The appearance counter-rotates by it
+        so the text reads upright as the page is displayed.
+    width: stroke width in points (shapes, lines, ink).
+    line: Line annotations: (x1, y1, x2, y2); arrow puts a head at x2, y2.
+    ink: Ink annotations: strokes, each a flat (x, y, x, y, ...) tuple.
+    label, sublabel, stamp_name: stamps: the big word, the small name/date
+        line, and the /Name viewers use to identify the stamp type.
     """
 
     kind: str
@@ -114,6 +125,13 @@ class Annot:
     boxed: bool = False
     fixed_width: bool = False
     text_rotation: int = 0
+    width: float = 1.0
+    line: Tuple[float, ...] = ()
+    arrow: bool = False
+    ink: Tuple[Tuple[float, ...], ...] = ()
+    label: str = ""
+    sublabel: str = ""
+    stamp_name: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "rect", normalize_rect(tuple(float(v) for v in self.rect)))
@@ -128,14 +146,22 @@ class Annot:
 
     def moved(self, dx: float, dy: float) -> "Annot":
         x0, y0, x1, y1 = self.rect
-        quads = tuple(v + (dx if i % 2 == 0 else dy) for i, v in enumerate(self.quads))
-        return replace(self, rect=(x0 + dx, y0 + dy, x1 + dx, y1 + dy), quads=quads,
+        return replace(self, rect=(x0 + dx, y0 + dy, x1 + dx, y1 + dy),
+                       quads=_shift(self.quads, dx, dy), line=_shift(self.line, dx, dy),
+                       ink=tuple(_shift(stroke, dx, dy) for stroke in self.ink),
                        offset=(self.offset[0] + dx, self.offset[1] + dy))
 
     def with_contents(self, contents: str) -> "Annot":
         return replace(self, contents=contents, edited=True)
 
     def contains(self, x: float, y: float, slop: float = 2.0) -> bool:
+        # Lines and ink by distance to the stroke: a diagonal line's bounding
+        # box is mostly empty page, which shouldn't grab it.
+        reach = slop + self.width / 2
+        if self.line:
+            return _near_polyline(self.line, x, y, reach)
+        if self.ink:
+            return any(_near_polyline(stroke, x, y, reach) for stroke in self.ink)
         if self.quads:
             # Per line: a two-line highlight's bounding box also covers the
             # unmarked ends of both lines, which shouldn't select it.
@@ -147,6 +173,24 @@ class Annot:
             return False
         x0, y0, x1, y1 = self.rect
         return x0 - slop <= x <= x1 + slop and y0 - slop <= y <= y1 + slop
+
+
+def _shift(flat: Tuple[float, ...], dx: float, dy: float) -> Tuple[float, ...]:
+    return tuple(v + (dx if i % 2 == 0 else dy) for i, v in enumerate(flat))
+
+
+def _near_polyline(flat: Tuple[float, ...], x: float, y: float, reach: float) -> bool:
+    points = list(zip(flat[0::2], flat[1::2]))
+    if len(points) == 1:
+        points = points * 2
+    for (ax, ay), (bx, by) in zip(points, points[1:]):
+        vx, vy = bx - ax, by - ay
+        length2 = vx * vx + vy * vy
+        t = 0.0 if length2 == 0 else max(0.0, min(1.0, ((x - ax) * vx + (y - ay) * vy) / length2))
+        px, py = ax + t * vx - x, ay + t * vy - y
+        if px * px + py * py <= reach * reach:
+            return True
+    return False
 
 
 def without(annots: Iterable[Annot], gone: Annot) -> Tuple[Annot, ...]:
@@ -288,6 +332,72 @@ def new_text(rect: Rect, contents: str, author: str, size: float,
              color: Tuple[float, float, float], boxed: bool, rotation: int) -> Annot:
     return Annot("FreeText", rect, contents=contents, author=author, color=color,
                  font_size=size, boxed=boxed, fixed_width=boxed, text_rotation=rotation,
+                 uid=next(_uids))
+
+
+# ---- shapes, ink, stamps ------------------------------------------------------
+
+SHAPE_COLORS = {"Red": (0.85, 0.1, 0.1), "Blue": (0.1, 0.3, 0.85),
+                "Green": (0.1, 0.6, 0.2), "Black": (0.0, 0.0, 0.0)}
+SHAPE_WIDTHS = (1, 2, 4, 8)
+ARROW_LENGTH = 3.5   # arrowhead length, in stroke widths (at least 6pt)
+
+
+def _bbox(points, pad: float) -> Rect:
+    xs, ys = points[0::2], points[1::2]
+    return (min(xs) - pad, min(ys) - pad, max(xs) + pad, max(ys) + pad)
+
+
+def new_shape(kind: str, rect: Rect, author: str, color, width: float) -> Annot:
+    """A Square or Circle drawn inside `rect` (the stroke stays inside)."""
+    if kind not in ("Square", "Circle"):
+        raise ValueError(kind)
+    return Annot(kind, rect, author=author, color=color, width=width, uid=next(_uids))
+
+
+def new_line(x1: float, y1: float, x2: float, y2: float, author: str, color, width: float,
+             arrow: bool) -> Annot:
+    # Rect must hold the stroke's thickness and the arrowhead too.
+    pad = width / 2 + (max(6.0, width * ARROW_LENGTH) if arrow else 0.0) + 1
+    return Annot("Line", _bbox((x1, y1, x2, y2), pad), author=author, color=color, width=width,
+                 line=(x1, y1, x2, y2), arrow=arrow, uid=next(_uids))
+
+
+def new_ink(stroke: Tuple[float, ...], author: str, color, width: float) -> Annot:
+    return Annot("Ink", _bbox(stroke, width / 2 + 1), author=author, color=color, width=width,
+                 ink=(tuple(stroke),), uid=next(_uids))
+
+
+# (label, colour, carries name and date, /Name)
+STAMPS = (
+    ("APPROVED", (0.1, 0.55, 0.2), True, "Approved"),
+    ("REVIEWED", (0.1, 0.3, 0.8), True, "Reviewed"),
+    ("RECEIVED", (0.1, 0.3, 0.8), True, "Received"),
+    ("DRAFT", (0.35, 0.35, 0.45), False, "Draft"),
+    ("CONFIDENTIAL", (0.8, 0.1, 0.1), False, "Confidential"),
+    ("REJECTED", (0.8, 0.1, 0.1), False, "NotApproved"),
+)
+STAMP_SIZE = 16.0     # label font size, points
+STAMP_SUBSIZE = 7.0
+STAMP_PADDING = 6.0
+
+
+def stamp_size(label: str, sublabel: str) -> Tuple[float, float]:
+    """(width, height) of a stamp as read on screen."""
+    inner = max(bold_text_width(label, STAMP_SIZE), text_width(sublabel, STAMP_SUBSIZE))
+    height = STAMP_SIZE + (STAMP_SUBSIZE * 1.4 if sublabel else 0.0)
+    return inner + 2 * STAMP_PADDING, height + 2 * STAMP_PADDING
+
+
+def new_stamp(label: str, sublabel: str, x: float, y: float, author: str, color,
+              rotation: int, name: str) -> Annot:
+    """A stamp centred on (x, y), reading upright on a page shown at `rotation`."""
+    w, h = stamp_size(label, sublabel)
+    if rotation % 180:
+        w, h = h, w
+    rect = (x - w / 2, y - h / 2, x + w / 2, y + h / 2)
+    return Annot("Stamp", rect, contents=label, author=author, color=color,
+                 text_rotation=rotation, label=label, sublabel=sublabel, stamp_name=name,
                  uid=next(_uids))
 
 

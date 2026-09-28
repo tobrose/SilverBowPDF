@@ -13,6 +13,7 @@ Acrobat, Edge and Chrome would each show a different note icon.
 from __future__ import annotations
 
 import io
+import math
 import time
 import uuid
 import warnings
@@ -23,8 +24,19 @@ from typing import Iterable, List, Optional, Sequence, Tuple
 import pikepdf
 from pikepdf import Array, Dictionary, Name, String
 
-from .annots import MARKUP_DEFAULT_COLORS, NOTE_SIZE, Annot, is_editable, text_box_size
-from .textlayout import ASCENT, LEADING, PADDING, layout
+from .annots import (
+    ARROW_LENGTH,
+    MARKUP_DEFAULT_COLORS,
+    NOTE_SIZE,
+    STAMP_PADDING,
+    STAMP_SIZE,
+    STAMP_SUBSIZE,
+    Annot,
+    is_editable,
+    stamp_size,
+    text_box_size,
+)
+from .textlayout import ASCENT, LEADING, PADDING, bold_text_width, layout, text_width
 
 
 def pdf_date(t: Optional[float] = None) -> str:
@@ -164,6 +176,161 @@ def _freetext_fields(d: Dictionary, annot: Annot) -> None:
     d.Rect = Array(list(annot.rect))
 
 
+# ---- shapes, lines, ink, stamps ------------------------------------------------
+
+_K = 0.5523  # cubic Bezier handle length for a quarter ellipse
+
+
+def _form(pdf: pikepdf.Pdf, ops: bytes, bbox, matrix=None, resources=None) -> pikepdf.Stream:
+    stream = pdf.make_stream(ops)
+    stream.Type = Name.XObject
+    stream.Subtype = Name.Form
+    stream.BBox = Array(list(bbox))
+    if matrix is not None:
+        stream.Matrix = Array(matrix)
+    stream.Resources = resources if resources is not None else Dictionary()
+    return stream
+
+
+def _ellipse_path(x0: float, y0: float, x1: float, y1: float) -> str:
+    cx, cy, rx, ry = (x0 + x1) / 2, (y0 + y1) / 2, (x1 - x0) / 2, (y1 - y0) / 2
+    kx, ky = rx * _K, ry * _K
+    return (f"{cx + rx:.3f} {cy:.3f} m "
+            f"{cx + rx:.3f} {cy + ky:.3f} {cx + kx:.3f} {cy + ry:.3f} {cx:.3f} {cy + ry:.3f} c "
+            f"{cx - kx:.3f} {cy + ry:.3f} {cx - rx:.3f} {cy + ky:.3f} {cx - rx:.3f} {cy:.3f} c "
+            f"{cx - rx:.3f} {cy - ky:.3f} {cx - kx:.3f} {cy - ry:.3f} {cx:.3f} {cy - ry:.3f} c "
+            f"{cx + kx:.3f} {cy - ry:.3f} {cx + rx:.3f} {cy - ky:.3f} {cx + rx:.3f} {cy:.3f} c h")
+
+
+def _shape_appearance(pdf: pikepdf.Pdf, kind: str, rect, color, width: float,
+                      fill=None) -> pikepdf.Stream:
+    """Square / Circle, stroke kept inside the rect. Drawn in page space
+    (BBox == Rect, identity Matrix)."""
+    x0, y0, x1, y1 = rect
+    inset = width / 2
+    ix0, iy0, ix1, iy1 = x0 + inset, y0 + inset, x1 - inset, y1 - inset
+    path = (f"{ix0:.3f} {iy0:.3f} {ix1 - ix0:.3f} {iy1 - iy0:.3f} re" if kind == "Square"
+            else _ellipse_path(ix0, iy0, ix1, iy1))
+    paint = "B" if fill is not None else "S"
+    ops = f"q {width:g} w {_rgb(color)} RG "
+    if fill is not None:
+        ops += f"{_rgb(fill)} rg "
+    ops += f"{path} {paint} Q"
+    return _form(pdf, ops.encode(), rect)
+
+
+def _arrowhead(x1, y1, x2, y2, width: float) -> str:
+    """An open arrowhead at (x2, y2) pointing away from (x1, y1)."""
+    angle = math.atan2(y2 - y1, x2 - x1)
+    length = max(6.0, width * ARROW_LENGTH)
+    spread = math.radians(28)
+    ax = x2 - length * math.cos(angle - spread)
+    ay = y2 - length * math.sin(angle - spread)
+    bx = x2 - length * math.cos(angle + spread)
+    by = y2 - length * math.sin(angle + spread)
+    return f"{ax:.3f} {ay:.3f} m {x2:.3f} {y2:.3f} l {bx:.3f} {by:.3f} l S"
+
+
+def _line_appearance(pdf: pikepdf.Pdf, annot: Annot) -> pikepdf.Stream:
+    x1, y1, x2, y2 = annot.line
+    ops = (f"q {annot.width:g} w 1 J 1 j {_rgb(annot.color)} RG "
+           f"{x1:.3f} {y1:.3f} m {x2:.3f} {y2:.3f} l S")
+    if annot.arrow:
+        ops += " " + _arrowhead(x1, y1, x2, y2, annot.width)
+    return _form(pdf, (ops + " Q").encode(), annot.rect)
+
+
+def _ink_path(stroke) -> str:
+    """Smooth a stroke: curves through the midpoints between samples, with
+    the samples as control points. Mouse input is jagged; this isn't."""
+    pts = list(zip(stroke[0::2], stroke[1::2]))
+    if len(pts) == 1:
+        (x, y), = pts
+        return f"{x:.3f} {y:.3f} m {x:.3f} {y:.3f} l"
+    ops = [f"{pts[0][0]:.3f} {pts[0][1]:.3f} m"]
+    for (ax, ay), (bx, by) in zip(pts[1:-1], pts[2:]):
+        mx, my = (ax + bx) / 2, (ay + by) / 2
+        ops.append(f"{ax:.3f} {ay:.3f} {ax:.3f} {ay:.3f} {mx:.3f} {my:.3f} c")
+    ops.append(f"{pts[-1][0]:.3f} {pts[-1][1]:.3f} l")
+    return " ".join(ops)
+
+
+def _ink_appearance(pdf: pikepdf.Pdf, annot: Annot) -> pikepdf.Stream:
+    ops = f"q {annot.width:g} w 1 J 1 j {_rgb(annot.color)} RG "
+    ops += " ".join(f"{_ink_path(stroke)} S" for stroke in annot.ink)
+    return _form(pdf, (ops + " Q").encode(), annot.rect)
+
+
+def _stamp_appearance(pdf: pikepdf.Pdf, annot: Annot) -> pikepdf.Stream:
+    """Rounded frame, bold label, optional small line; upright on the page
+    as displayed (same counter-rotation as text boxes)."""
+    w, h = stamp_size(annot.label, annot.sublabel)
+    r = 4.0
+    c = _rgb(annot.color)
+    frame = (f"{r + 1:.3f} 1 m {w - r - 1:.3f} 1 l "
+             f"{w - 1:.3f} 1 {w - 1:.3f} 1 {w - 1:.3f} {r + 1:.3f} c "
+             f"{w - 1:.3f} {h - r - 1:.3f} l {w - 1:.3f} {h - 1:.3f} {w - 1:.3f} {h - 1:.3f} "
+             f"{w - r - 1:.3f} {h - 1:.3f} c {r + 1:.3f} {h - 1:.3f} l 1 {h - 1:.3f} 1 {h - 1:.3f} "
+             f"1 {h - r - 1:.3f} c 1 {r + 1:.3f} l 1 1 1 1 {r + 1:.3f} 1 c h")
+    label_x = (w - bold_text_width(annot.label, STAMP_SIZE)) / 2
+    label_y = h - STAMP_PADDING - STAMP_SIZE * 0.78
+    ops = [f"q 2 w {c} RG {frame} S BT /HelvB {STAMP_SIZE:g} Tf {c} rg "
+           f"1 0 0 1 {label_x:.3f} {label_y:.3f} Tm ".encode() + _pdf_literal(annot.label)
+           + b" Tj"]
+    if annot.sublabel:
+        sub_x = (w - text_width(annot.sublabel, STAMP_SUBSIZE)) / 2
+        sub_y = STAMP_PADDING + STAMP_SUBSIZE * 0.25
+        ops.append(f"/Helv {STAMP_SUBSIZE:g} Tf 1 0 0 1 {sub_x:.3f} {sub_y:.3f} Tm ".encode()
+                   + _pdf_literal(annot.sublabel) + b" Tj")
+    ops.append(b"ET Q")
+    fonts = Dictionary(
+        HelvB=pdf.make_indirect(Dictionary(Type=Name.Font, Subtype=Name.Type1,
+                                           BaseFont=Name("/Helvetica-Bold"),
+                                           Encoding=Name.WinAnsiEncoding)),
+        Helv=_helvetica(pdf))
+    return _form(pdf, b" ".join(ops), (0, 0, w, h),
+                 matrix=_COUNTER_ROTATION[annot.text_rotation % 360],
+                 resources=Dictionary(Font=fonts))
+
+
+def _common(annot: Annot, subtype: str) -> Dictionary:
+    now = pdf_date()
+    return Dictionary(
+        Type=Name.Annot, Subtype=Name("/" + subtype),
+        Rect=Array(list(annot.rect)),
+        Contents=String(annot.contents),
+        T=String(annot.author),
+        NM=String(f"butterpdf-{uuid.uuid4()}"),
+        M=String(now), CreationDate=String(now),
+        F=4,  # Print
+    )
+
+
+def _stroke_style(d: Dictionary, annot: Annot) -> None:
+    d.C = Array(list(annot.color))
+    d.BS = Dictionary(W=annot.width, S=Name.S)
+    d.Border = Array([0, 0, annot.width])
+
+
+def _existing_style(d: Dictionary):
+    """(colour, width, fill) of a shape made elsewhere, for redrawing it."""
+    def rgb(key):
+        try:
+            value = tuple(float(v) for v in d[key])
+            return value if len(value) == 3 else None
+        except (KeyError, TypeError, ValueError):
+            return None
+    width = 1.0
+    try:
+        if "/BS" in d and "/W" in d.BS:
+            width = float(d.BS.W)
+        elif "/Border" in d and len(d.Border) >= 3:
+            width = float(d.Border[2])
+    except (TypeError, ValueError):
+        pass
+    return rgb("/C") or (0.0, 0.0, 0.0), width, rgb("/IC")
+
+
 def build_annot(pdf: pikepdf.Pdf, annot: Annot) -> pikepdf.Object:
     """A new annotation dictionary (indirect) for an Annot created here."""
     now = pdf_date()
@@ -180,6 +347,34 @@ def build_annot(pdf: pikepdf.Pdf, annot: Annot) -> pikepdf.Object:
             F=4,  # Print
         )
         d.AP = Dictionary(N=_markup_appearance(pdf, annot))
+        return pdf.make_indirect(d)
+    if annot.kind in ("Square", "Circle"):
+        d = _common(annot, annot.kind)
+        _stroke_style(d, annot)
+        d.AP = Dictionary(N=_shape_appearance(pdf, annot.kind, annot.rect, annot.color,
+                                              annot.width))
+        return pdf.make_indirect(d)
+    if annot.kind == "Line":
+        d = _common(annot, "Line")
+        _stroke_style(d, annot)
+        d.L = Array(list(annot.line))
+        none = Name("/None")  # Name.None_ would be spelled /None_
+        d.LE = Array([none, Name.OpenArrow if annot.arrow else none])
+        d.AP = Dictionary(N=_line_appearance(pdf, annot))
+        return pdf.make_indirect(d)
+    if annot.kind == "Ink":
+        d = _common(annot, "Ink")
+        _stroke_style(d, annot)
+        d.InkList = Array([Array(list(stroke)) for stroke in annot.ink])
+        d.AP = Dictionary(N=_ink_appearance(pdf, annot))
+        return pdf.make_indirect(d)
+    if annot.kind == "Stamp":
+        d = _common(annot, "Stamp")
+        d.Name = Name("/" + (annot.stamp_name or "Draft"))
+        d.C = Array(list(annot.color))
+        if annot.sublabel:
+            d.Contents = String(f"{annot.label}\n{annot.sublabel}")
+        d.AP = Dictionary(N=_stamp_appearance(pdf, annot))
         return pdf.make_indirect(d)
     if annot.kind == "FreeText":
         d = Dictionary(
@@ -304,6 +499,14 @@ def apply_edits(pdf: pikepdf.Pdf, page_obj: Dictionary, annots: Sequence[Annot])
             if a.reshaped and a.kind == "FreeText":
                 _freetext_fields(d, a)
                 d.AP = Dictionary(N=_freetext_appearance(pdf, a))
+            elif a.reshaped and a.kind in ("Square", "Circle"):
+                # Resized: the old appearance showed the old size. Redraw in
+                # its own colour, width and fill.
+                color, width, fill = _existing_style(d)
+                d.Rect = Array(list(a.rect))
+                if "/RD" in d:
+                    del d["/RD"]
+                d.AP = Dictionary(N=_shape_appearance(pdf, a.kind, a.rect, color, width, fill))
             elif a.reshaped:
                 _reshape_markup(pdf, d, a)
             if a.offset != (0.0, 0.0) or a.edited or a.reshaped:

@@ -173,6 +173,15 @@ width re-wraps, height is clamped so text is never cut off. `fixed_width`
 (wraps) is separate from `boxed` (border): resizing typewriter text gives
 it a width. Only while the text reads upright on screen.
 
+Annotations stage 4: Rectangle R / Ellipse E (Shift = square/circle),
+Line L / Arrow A (Shift = 45 degree snap), Pen P (smoothed ink, one
+annotation per stroke) -- these stay active until Esc; Stamps (menu:
+Approved/Reviewed/Received carry author + time; Draft/Confidential/
+Rejected plain) place once then return to Select, upright on rotated pages
+like text. Shape style menu: colour + 1-8pt width. Lines and ink hit-test
+along the stroke. Rectangles/ellipses resize at any rotation, file ones
+redrawn in their own /C, width and /IC. Author = Windows login name.
+
 Next, in order (user chose all of these): shapes, ink, stamps;
 authoring fillable form fields; form filling; encryption; OCR for scanned
 pages (user confirmed it's required; engine not chosen -- weigh machine-image

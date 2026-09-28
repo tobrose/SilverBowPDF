@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import getpass
 import math
+import time
 from dataclasses import replace
 from enum import Enum
 from typing import List, Optional
 
-from PySide6.QtCore import QPoint, QRect, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPen, QTextCursor, QWheelEvent
+from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QTextCursor, QWheelEvent
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -31,12 +32,19 @@ from PySide6.QtWidgets import (
 
 from .annots import (
     HIGHLIGHT_COLORS,
+    SHAPE_COLORS,
+    STAMPS,
     TEXT_BOX_WIDTH,
     TEXT_COLORS,
     Annot,
     describe,
+    describe_annot,
     lay_markup,
+    new_ink,
+    new_line,
     new_markup,
+    new_shape,
+    new_stamp,
     new_text,
     text_box_size,
     without,
@@ -68,12 +76,21 @@ class Tool(Enum):
     STRIKEOUT = "strikeout"
     TYPEWRITER = "typewriter"
     TEXTBOX = "textbox"
+    RECT = "rect"
+    ELLIPSE = "ellipse"
+    LINE = "line"
+    ARROW = "arrow"
+    PEN = "pen"
+    STAMP = "stamp"
 
 
 # Tools that mark text: drag across it, a markup annotation lands on release.
 MARKUP_TOOLS = {Tool.HIGHLIGHT: "Highlight", Tool.UNDERLINE: "Underline",
                 Tool.STRIKEOUT: "StrikeOut"}
 TEXT_TOOLS = (Tool.TYPEWRITER, Tool.TEXTBOX)
+# Drag to draw; they stay selected for drawing several, Esc leaves.
+DRAW_TOOLS = (Tool.RECT, Tool.ELLIPSE, Tool.LINE, Tool.ARROW, Tool.PEN)
+RESIZABLE_SHAPES = ("Square", "Circle")
 
 _EDGE_CURSORS = {
     "l": Qt.SizeHorCursor, "r": Qt.SizeHorCursor, "t": Qt.SizeVerCursor, "b": Qt.SizeVerCursor,
@@ -248,6 +265,9 @@ class PdfView(QScrollArea):
         self.highlight_color = HIGHLIGHT_COLORS["Yellow"]
         self.text_size = 12.0
         self.text_color = TEXT_COLORS["Black"]
+        self.shape_color = SHAPE_COLORS["Red"]
+        self.shape_width = 2.0
+        self.stamp = STAMPS[0]  # (label, colour, dated, /Name)
         self._editor = None     # open text box editor, see _open_editor
         self.author = getpass.getuser()  # /T on annotations created here
         self.setFocusPolicy(Qt.StrongFocus)  # Delete and Esc for annotations
@@ -288,7 +308,7 @@ class PdfView(QScrollArea):
         self.tool_changed.emit(tool)
 
     def _tool_cursor(self):
-        if self._tool is Tool.NOTE:
+        if self._tool is Tool.NOTE or self._tool in DRAW_TOOLS or self._tool is Tool.STAMP:
             return Qt.CrossCursor
         if self._tool in MARKUP_TOOLS or self._tool in TEXT_TOOLS:
             return Qt.IBeamCursor
@@ -418,6 +438,13 @@ class PdfView(QScrollArea):
             x, y = page.pdf_point_at(pos)
             self.note_requested.emit(page.index, x, y)
             return True
+        if self._tool is Tool.STAMP:
+            self._place_stamp(page, pos)
+            return True
+        if self._tool in DRAW_TOOLS:
+            self._drag = {"mode": "draw", "page": page, "press": pos, "end": None,
+                          "shift": False, "points": [page.pdf_point_at(pos)]}
+            return True
         if self._tool in TEXT_TOOLS:
             hit = self._annot_at(page, pos)
             if hit is not None and hit.kind == "FreeText":
@@ -458,6 +485,15 @@ class PdfView(QScrollArea):
                 return True
             if drag["mode"] == "resize":
                 drag["rect"] = self._resized_rect(page, drag, pos)
+                page.update()
+                return True
+            if drag["mode"] == "draw":
+                drag["end"] = pos
+                drag["shift"] = bool(event.modifiers() & Qt.ShiftModifier)
+                if self._tool is Tool.PEN:
+                    last = page.widget_transform().pdf_to_widget(*drag["points"][-1])
+                    if abs(pos.x() - last[0]) + abs(pos.y() - last[1]) >= 2:
+                        drag["points"].append(page.pdf_point_at(pos))
                 page.update()
                 return True
             if drag["mode"] == "place":
@@ -510,16 +546,23 @@ class PdfView(QScrollArea):
         drag, self._drag = self._drag, None
         if drag is None or event.button() != Qt.LeftButton:
             return False
+        if drag["mode"] == "draw":
+            drag["shift"] = bool(event.modifiers() & Qt.ShiftModifier)
+            if drag["end"] is not None:
+                self._finish_drawing(page, drag)
+            page.update()
+            return True
         if drag["mode"] == "resize":
             if drag["rect"] is not None:
                 old = drag["annot"]
                 left, top, right, bottom = drag["rect"]
                 rect = page.widget_transform().widget_rect_to_pdf((left, top, right, bottom))
-                resized = replace(old, rect=rect, fixed_width=True, reshaped=True)
+                resized = replace(old, rect=rect, reshaped=True,
+                                  fixed_width=old.fixed_width or old.kind == "FreeText")
                 self.annots_edit.emit(self.document.page_key(page.index),
                                       tuple(resized if a.ident == old.ident else a
                                             for a in self.document.page_annots(page.index)),
-                                      f"Resize {describe(old.kind)}")
+                                      f"Resize {describe_annot(old)}")
             page.update()
             return True
         if drag["mode"] == "place":
@@ -544,7 +587,7 @@ class PdfView(QScrollArea):
                 annots = tuple(a.moved(dx, dy) if a.ident == moved.ident else a
                                for a in self.document.page_annots(page.index))
                 self.annots_edit.emit(self.document.page_key(page.index), annots,
-                                      f"Move {describe(moved.kind)}")
+                                      f"Move {describe_annot(moved)}")
         elif drag["anchor"] is None:
             self.clear_text_selection()  # a click, not a drag
         elif self._tool in MARKUP_TOOLS:
@@ -569,7 +612,88 @@ class PdfView(QScrollArea):
             return True
         return False
 
-    # -- resizing text boxes (in widget space; see _resize_hit for when)
+    # -- drawing shapes, lines, ink; placing stamps
+
+    def _drawn_points(self, page: "PageWidget", drag):
+        """(start, end) in widget px, Shift-constrained: equal sides for
+        rectangles and ellipses, 45-degree steps for lines and arrows."""
+        a, b = drag["press"], drag["end"]
+        ax, ay, bx, by = a.x(), a.y(), b.x(), b.y()
+        if drag["shift"]:
+            dx, dy = bx - ax, by - ay
+            if self._tool in (Tool.RECT, Tool.ELLIPSE):
+                side = max(abs(dx), abs(dy))
+                bx, by = ax + math.copysign(side, dx or 1), ay + math.copysign(side, dy or 1)
+            elif self._tool in (Tool.LINE, Tool.ARROW):
+                length = math.hypot(dx, dy)
+                angle = round(math.atan2(dy, dx) / (math.pi / 4)) * (math.pi / 4)
+                bx, by = ax + length * math.cos(angle), ay + length * math.sin(angle)
+        return (ax, ay), (bx, by)
+
+    def _finish_drawing(self, page: "PageWidget", drag) -> None:
+        doc = self.document
+        t = page.widget_transform()
+        (ax, ay), (bx, by) = self._drawn_points(page, drag)
+        color, width = self.shape_color, self.shape_width
+        if self._tool is Tool.PEN:
+            flat = tuple(v for pt in drag["points"] for v in pt)
+            if len(flat) == 2:
+                flat = flat * 2  # a dot
+            annot = new_ink(flat, self.author, color, width)
+            label = "Add Drawing"
+        elif math.hypot(bx - ax, by - ay) < 3:
+            return  # a click, not a drag
+        elif self._tool in (Tool.RECT, Tool.ELLIPSE):
+            rect = t.widget_rect_to_pdf((min(ax, bx), min(ay, by), max(ax, bx), max(ay, by)))
+            kind = "Square" if self._tool is Tool.RECT else "Circle"
+            annot = new_shape(kind, rect, self.author, color, width)
+            label = "Add Rectangle" if kind == "Square" else "Add Ellipse"
+        else:
+            x1, y1 = t.widget_to_pdf(ax, ay)
+            x2, y2 = t.widget_to_pdf(bx, by)
+            arrow = self._tool is Tool.ARROW
+            annot = new_line(x1, y1, x2, y2, self.author, color, width, arrow)
+            label = "Add Arrow" if arrow else "Add Line"
+        self.annots_edit.emit(doc.page_key(page.index), doc.page_annots(page.index) + (annot,),
+                              label)
+
+    def _paint_drawing(self, page: "PageWidget", painter: QPainter, drag) -> None:
+        """Preview while dragging -- chrome; pdfium draws the real thing."""
+        scale = page.widget_transform().scale
+        r, g, b = (round(c * 255) for c in self.shape_color)
+        pen = QPen(QColor(r, g, b, 200), max(1.0, self.shape_width * scale))
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        if self._tool is Tool.PEN:
+            path = QPainterPath()
+            for i, pt in enumerate(drag["points"]):
+                x, y = page.widget_transform().pdf_to_widget(*pt)
+                path.moveTo(x, y) if i == 0 else path.lineTo(x, y)
+            painter.drawPath(path)
+            return
+        (ax, ay), (bx, by) = self._drawn_points(page, drag)
+        if self._tool is Tool.RECT:
+            painter.drawRect(QRectF(min(ax, bx), min(ay, by), abs(bx - ax), abs(by - ay)))
+        elif self._tool is Tool.ELLIPSE:
+            painter.drawEllipse(QRectF(min(ax, bx), min(ay, by), abs(bx - ax), abs(by - ay)))
+        else:
+            painter.drawLine(QPointF(ax, ay), QPointF(bx, by))
+
+    def _place_stamp(self, page: "PageWidget", pos: QPoint) -> None:
+        label, color, dated, name = self.stamp
+        sublabel = f"{self.author}, {time.strftime('%Y-%m-%d %H:%M')}" if dated else ""
+        x, y = page.pdf_point_at(pos)
+        doc = self.document
+        stamp = new_stamp(label, sublabel, x, y, self.author, color,
+                          doc.page_rotation(page.index), name)
+        self.annots_edit.emit(doc.page_key(page.index), doc.page_annots(page.index) + (stamp,),
+                              "Add Stamp")
+        self.select_annot(page.index, stamp.ident)
+        self.set_tool(Tool.SELECT)  # like a note: one stamp per pick
+
+    # -- resizing text boxes and shapes (widget space; see _resize_hit)
 
     def _resize_hit(self, page: "PageWidget", pos: QPoint):
         """(annot, edges) if `pos` is on a resizable edge, else None.
@@ -578,13 +702,15 @@ class PdfView(QScrollArea):
         page turned since typing, "drag the right edge wider" would change
         the text's height instead, which is just confusing.
         """
-        if self._rotation != 0 or self.document is None:
+        if self.document is None:
             return None
         grip = 5  # screen px either side of an edge
         x, y = pos.x(), pos.y()
         page_rotation = self.document.page_rotation(page.index)
         for annot in reversed(self.document.page_annots(page.index)):
-            if annot.kind != "FreeText" or annot.text_rotation != page_rotation:
+            upright_text = annot.kind == "FreeText" and self._rotation == 0 \
+                and annot.text_rotation == page_rotation
+            if not upright_text and annot.kind not in RESIZABLE_SHAPES:
                 continue
             left, top, right, bottom = page.widget_transform().pdf_rect_to_widget(annot.rect)
             if not (left - grip <= x <= right + grip and top - grip <= y <= bottom + grip):
@@ -617,6 +743,20 @@ class PdfView(QScrollArea):
         if "b" in edges:
             bottom += dy
         scale = page.widget_transform().scale
+        if annot.kind != "FreeText":
+            # Shapes: anything but degenerate. Edges may cross; normalise.
+            min_side = 4.0
+            if right - left < min_side:
+                if "l" in edges:
+                    left = right - min_side
+                else:
+                    right = left + min_side
+            if bottom - top < min_side:
+                if "t" in edges:
+                    top = bottom - min_side
+                else:
+                    bottom = top + min_side
+            return left, top, right, bottom
         min_width = (annot.font_size + 2 * PADDING) * scale
         if right - left < min_width:
             if "l" in edges:
@@ -744,7 +884,7 @@ class PdfView(QScrollArea):
         index, gone = found
         annots = without(self.document.page_annots(index), gone)
         self._selected = None
-        self.annots_edit.emit(self.document.page_key(index), annots, f"Delete {describe(gone.kind)}")
+        self.annots_edit.emit(self.document.page_key(index), annots, f"Delete {describe_annot(gone)}")
         return True
 
     def keyPressEvent(self, event) -> None:
@@ -763,6 +903,9 @@ class PdfView(QScrollArea):
         """Text selection, and the selected annotation's outline and drag
         preview. UI chrome only -- annotations are always drawn by pdfium."""
         drag = self._drag
+        if drag is not None and drag["mode"] == "draw" and drag["page"] is page \
+                and drag["end"] is not None:
+            self._paint_drawing(page, painter, drag)
         if drag is not None and drag["mode"] == "resize" and drag["page"] is page \
                 and drag["rect"] is not None:
             left, top, right, bottom = drag["rect"]

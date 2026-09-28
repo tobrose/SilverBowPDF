@@ -47,6 +47,8 @@ on a headless box.
 | `T` / `X` | Typewriter / Text Box: click (or drag a width) and type; `Esc` or click away to finish (back to Select) |
 | Double-click a text box | Edit its text in place |
 | Drag a text box's edge or corner | Resize it; the text re-wraps |
+| `R` / `E` / `L` / `A` / `P` | Rectangle / Ellipse / Line / Arrow / Pen -- drag to draw; `Shift` squares or snaps to 45 degrees |
+| Stamp button | Pick a stamp, click to place it |
 | Click, drag, `Delete` | Select, move, delete an annotation |
 | Double-click an annotation | Edit its comment |
 | `PgUp` `PgDn` `Ctrl+Home` `Ctrl+End` `Ctrl+G` | Navigation |

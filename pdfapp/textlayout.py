@@ -56,6 +56,23 @@ def _width_of(ch: str) -> int:
     return _ASCII.get(base, 556)
 
 
+# Helvetica-Bold, for stamp labels -- capitals, digits and the punctuation
+# stamps use. Anything else falls back to the regular width, near enough
+# for sizing a stamp's frame.
+_BOLD = {
+    " ": 278, "-": 333, ".": 278, ",": 278, ":": 333, "/": 278, "!": 333, "&": 722,
+    "0": 556, "1": 556, "2": 556, "3": 556, "4": 556, "5": 556, "6": 556, "7": 556,
+    "8": 556, "9": 556, "A": 722, "B": 722, "C": 722, "D": 722, "E": 667, "F": 611,
+    "G": 778, "H": 722, "I": 278, "J": 556, "K": 722, "L": 611, "M": 833, "N": 722,
+    "O": 778, "P": 667, "Q": 778, "R": 722, "S": 667, "T": 611, "U": 722, "V": 667,
+    "W": 944, "X": 667, "Y": 667, "Z": 611,
+}
+
+
+def bold_text_width(text: str, size: float) -> float:
+    return sum(_BOLD.get(ch, _width_of(ch)) for ch in text) * size / 1000.0
+
+
 def encodable(text: str) -> bool:
     try:
         text.encode("cp1252")

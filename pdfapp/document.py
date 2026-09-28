@@ -220,6 +220,12 @@ class PdfDocument:
                 if not pdfium_c.FPDFAnnot_GetRect(handle, rect):
                     continue
                 extra = {}
+                if kind in ("Square", "Circle", "Line", "Ink", "Polygon", "PolyLine"):
+                    extra["width"] = _border_width(handle) or 1.0
+                if kind == "Line":
+                    extra["line"] = _line_points(handle)
+                elif kind == "Ink":
+                    extra["ink"] = _ink_strokes(handle)
                 if kind == "FreeText":
                     size, color = parse_da(_annot_string(handle, b"DA"))
                     extra = dict(font_size=size, color=color, boxed=_border_width(handle) > 0,
@@ -453,6 +459,25 @@ class PdfDocument:
         if source.has_forms and formenv:
             pdfium_c.FPDF_FFLDraw(formenv, bitmap, page, *placement, pdfium_c.FPDF_ANNOT)
         return bitmap
+
+
+def _line_points(handle) -> Tuple[float, ...]:
+    start, end = pdfium_c.FS_POINTF(), pdfium_c.FS_POINTF()
+    if pdfium_c.FPDFAnnot_GetLine(handle, start, end):
+        return (start.x, start.y, end.x, end.y)
+    return ()
+
+
+def _ink_strokes(handle) -> Tuple[Tuple[float, ...], ...]:
+    strokes = []
+    for i in range(pdfium_c.FPDFAnnot_GetInkListCount(handle)):
+        n = pdfium_c.FPDFAnnot_GetInkListPath(handle, i, None, 0)
+        if n <= 0:
+            continue
+        points = (pdfium_c.FS_POINTF * n)()
+        pdfium_c.FPDFAnnot_GetInkListPath(handle, i, points, n)
+        strokes.append(tuple(v for pt in points for v in (pt.x, pt.y)))
+    return tuple(strokes)
 
 
 def _border_width(handle) -> float:

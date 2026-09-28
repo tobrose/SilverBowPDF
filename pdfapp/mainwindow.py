@@ -25,7 +25,18 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .annots import HIGHLIGHT_COLORS, TEXT_COLORS, TEXT_SIZES, Annot, DocState, describe, new_note
+from .annots import (
+    HIGHLIGHT_COLORS,
+    SHAPE_COLORS,
+    SHAPE_WIDTHS,
+    STAMPS,
+    TEXT_COLORS,
+    TEXT_SIZES,
+    Annot,
+    DocState,
+    describe,
+    new_note,
+)
 from .document import DocumentError, PasswordRequired, PdfDocument, SourceInfo
 from .pagelist import History, PageList
 from .pageview import FitMode, PdfView, Tool
@@ -175,11 +186,27 @@ class MainWindow(QMainWindow):
         self.act_tool_textbox = QAction("Text Box", self, shortcut=QKeySequence("X"),
                                         checkable=True,
                                         triggered=lambda: self.view.set_tool(Tool.TEXTBOX))
+        def tool(text, key, which):
+            act = QAction(text, self, checkable=True,
+                          triggered=lambda: self.view.set_tool(which))
+            if key:
+                act.setShortcut(QKeySequence(key))
+            return act
+
+        self.act_tool_rect = tool("Rectangle", "R", Tool.RECT)
+        self.act_tool_ellipse = tool("Ellipse", "E", Tool.ELLIPSE)
+        self.act_tool_line = tool("Line", "L", Tool.LINE)
+        self.act_tool_arrow = tool("Arrow", "A", Tool.ARROW)
+        self.act_tool_pen = tool("Pen", "P", Tool.PEN)
+        self.act_tool_stamp = tool("Stamp", None, Tool.STAMP)
         self.tool_actions = {
             Tool.SELECT: self.act_tool_select, Tool.NOTE: self.act_tool_note,
             Tool.HIGHLIGHT: self.act_tool_highlight, Tool.UNDERLINE: self.act_tool_underline,
             Tool.STRIKEOUT: self.act_tool_strikeout, Tool.TYPEWRITER: self.act_tool_typewriter,
-            Tool.TEXTBOX: self.act_tool_textbox,
+            Tool.TEXTBOX: self.act_tool_textbox, Tool.RECT: self.act_tool_rect,
+            Tool.ELLIPSE: self.act_tool_ellipse, Tool.LINE: self.act_tool_line,
+            Tool.ARROW: self.act_tool_arrow, Tool.PEN: self.act_tool_pen,
+            Tool.STAMP: self.act_tool_stamp,
         }
         for act in self.tool_actions.values():
             self.tool_group.addAction(act)
@@ -201,6 +228,26 @@ class MainWindow(QMainWindow):
         for name, color in TEXT_COLORS.items():
             act = self.text_menu.addAction(self._swatch(color), name)
             act.triggered.connect(lambda _=False, c=color: self._set_text_style(color=c))
+
+        self.shape_menu = QMenu("Shape Style", self)
+        for name, color in SHAPE_COLORS.items():
+            act = self.shape_menu.addAction(self._swatch(color), name)
+            act.triggered.connect(lambda _=False, c=color: self._set_shape_style(color=c))
+        self.shape_menu.addSeparator()
+        widths = QActionGroup(self)
+        for width in SHAPE_WIDTHS:
+            act = self.shape_menu.addAction(f"{width} pt line")
+            act.setCheckable(True)
+            act.setChecked(width == 2)
+            widths.addAction(act)
+            act.triggered.connect(lambda _=False, w=width: self._set_shape_style(width=w))
+
+        self.stamp_menu = QMenu("Stamps", self)
+        for stamp in STAMPS:
+            label, color, dated, _ = stamp
+            text = label.title() + ("  (name & date)" if dated else "")
+            act = self.stamp_menu.addAction(self._swatch(color), text)
+            act.triggered.connect(lambda _=False, st=stamp: self._pick_stamp(st))
 
         self.act_copy = QAction("&Copy", self, shortcut=QKeySequence.Copy, triggered=self.copy_text)
         self.act_copy.setEnabled(False)
@@ -280,6 +327,21 @@ class MainWindow(QMainWindow):
         typewriter.setPopupMode(QToolButton.MenuButtonPopup)
         tools.addWidget(typewriter)
         tools.addAction(self.act_tool_textbox)
+        tools.addSeparator()
+        rect = QToolButton(self)
+        rect.setDefaultAction(self.act_tool_rect)
+        rect.setMenu(self.shape_menu)
+        rect.setPopupMode(QToolButton.MenuButtonPopup)
+        tools.addWidget(rect)
+        for act in (self.act_tool_ellipse, self.act_tool_line, self.act_tool_arrow,
+                    self.act_tool_pen):
+            tools.addAction(act)
+        stamp = QToolButton(self)
+        stamp.setDefaultAction(self.act_tool_stamp)
+        stamp.setMenu(self.stamp_menu)
+        # The button itself opens the list: a stamp without a choice is useless.
+        stamp.setPopupMode(QToolButton.InstantPopup)
+        tools.addWidget(stamp)
         self.view.tool_changed.connect(self._on_tool_changed)
         self.view.editing_changed.connect(self._on_editing_changed)
         self.view.message.connect(lambda text: self.statusBar().showMessage(text, 8000))
@@ -308,6 +370,8 @@ class MainWindow(QMainWindow):
             tools_menu.addAction(act)
         tools_menu.addMenu(self.highlight_menu)
         tools_menu.addMenu(self.text_menu)
+        tools_menu.addMenu(self.shape_menu)
+        tools_menu.addMenu(self.stamp_menu)
 
         view_menu = self.menuBar().addMenu("&View")
         view_menu.addAction(self.act_zoom_in)
@@ -494,6 +558,20 @@ class MainWindow(QMainWindow):
             self.act_tool_typewriter.setIcon(self._swatch(color))
         if self.view.tool not in (Tool.TYPEWRITER, Tool.TEXTBOX):
             self.view.set_tool(Tool.TYPEWRITER)
+
+    def _set_shape_style(self, color=None, width=None) -> None:
+        if color is not None:
+            self.view.shape_color = color
+            self.act_tool_rect.setIcon(self._swatch(color))
+        if width is not None:
+            self.view.shape_width = float(width)
+        if self.view.tool not in (Tool.RECT, Tool.ELLIPSE, Tool.LINE, Tool.ARROW, Tool.PEN):
+            self.view.set_tool(Tool.RECT)
+
+    def _pick_stamp(self, stamp) -> None:
+        self.view.stamp = stamp
+        self.view.set_tool(Tool.STAMP)
+        self.statusBar().showMessage(f"Click on the page to place {stamp[0].title()}", 5000)
 
     def _on_editing_changed(self, editing: bool) -> None:
         # While typing into a text box, letters must reach the editor: the
