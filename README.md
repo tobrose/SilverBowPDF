@@ -40,6 +40,7 @@ on a headless box.
 | `Ctrl+Z` `Ctrl+Y` | Undo / redo |
 | `Ctrl+S` `Ctrl+Shift+S` | Save / save as |
 | Right-click a page | Page operations for that page |
+| Tools > Single-Letter Tool Shortcuts | Turn on the letter keys below (off by default) |
 | `V` / `N` / `Esc` | Select tool / Note tool / back to Select |
 | `H` / `U` / `S` | Highlight / Underline / Strikethrough tools -- drag across text |
 | Drag on text, double-click a word | Select text; `Ctrl+C` copies, `Ctrl+A` selects the page |

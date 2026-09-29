@@ -216,7 +216,13 @@ in Edit Fields returns to Select (user's rule, as everywhere).
 Toolbar / Tools menu layout (user's): Select, Annotate (drop-down: note,
 text markup, typewriter/text box, shapes/pen, stamps, style menus), Form
 (drop-down: Edit Fields + field tools). The buttons keep their labels and
-name the active tool ("Annotate: Rectangle"). Keyboard shortcuts unchanged.
+name the active tool ("Annotate: Rectangle").
+
+Single-letter tool shortcuts are OFF by default (user's call: their users
+are mouse-only). Tools menu toggle (HKCU); administrator policy
+HKLM\Software\Policies\ButterPDF\SingleKeyShortcuts locks it either way
+(settings.py; installer task lockletterkeys). Ctrl shortcuts always on.
+Tests pass INI-backed QSettings -- never touch the real registry.
 
 Next, in order (user chose all of these): shapes, ink, stamps;
 authoring fillable form fields; form filling; encryption; OCR for scanned

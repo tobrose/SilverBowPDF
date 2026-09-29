@@ -94,3 +94,18 @@ environment before committing, not on your desk.
 the thing is still moving. Don't scale this past a handful of people — there's
 no update mechanism and you'll end up supporting four versions at once.
 
+## Administrator policy
+
+Settings users choose live in `HKCU\Software\ButterPDF`; policy set by IT
+lives in `HKLM\Software\Policies\ButterPDF` and wins, with the matching
+menu item shown as "set by administrator". On a non-persistent desktop
+policy is the reliable place: HKLM is part of the machine image, while HKCU may not
+survive logoff.
+
+| Value | Type | Meaning |
+|---|---|---|
+| `SingleKeyShortcuts` | DWORD | `0` locks single-letter tool shortcuts (V, H, T, ...) off; `1` locks them on. Absent: off by default, and users may turn them on in the Tools menu. Ctrl shortcuts are never affected. |
+
+Set it by GPO (Registry preference), a deployment tool, or the installer task
+`lockletterkeys` (`/TASKS="lockletterkeys"` for a silent install).
+

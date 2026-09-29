@@ -63,6 +63,12 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; \
 Name: "associate"; Description: "Make {#AppName} the default app for .pdf files"; \
     GroupDescription: "File associations:"; Flags: unchecked
 
+; Single-letter tool shortcuts are off by default already; this LOCKS them
+; off so users can't turn them on (the Tools menu shows "set by
+; administrator"). Silent install: add /TASKS="lockletterkeys".
+Name: "lockletterkeys"; Description: "Lock single-letter tool shortcuts off for all users"; \
+    GroupDescription: "Administrator policy:"; Flags: unchecked
+
 [Files]
 ; PyInstaller onedir output. Everything under dist\ButterPDF\.
 Source: "..\dist\ButterPDF\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion
@@ -95,6 +101,11 @@ Root: HKA; Subkey: "Software\Classes\ButterPDF.Document\shell\open\command"; \
 Root: HKA; Subkey: "Software\Classes\.pdf"; \
     ValueType: string; ValueName: ""; ValueData: "ButterPDF.Document"; \
     Flags: uninsdeletevalue; Tasks: associate
+
+; Policy lives under HKLM\Software\Policies so GPO or deployment tooling can set the same
+; value without the installer. See docs/PACKAGING.md.
+Root: HKLM; Subkey: "Software\Policies\{#AppName}"; ValueType: dword; \
+    ValueName: "SingleKeyShortcuts"; ValueData: 0; Flags: uninsdeletekey; Tasks: lockletterkeys
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; \
