@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import getpass
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 
@@ -75,6 +76,7 @@ class MainWindow(QMainWindow):
         self.view.setContextMenuPolicy(Qt.CustomContextMenu)
         self.view.customContextMenuRequested.connect(self._page_context_menu)
         self.view.annots_edit.connect(self._on_annots_edit)
+        self.view.fields_edit.connect(self._on_fields_edit)
         self.view.annot_open.connect(self._on_annot_open)
         self.view.note_requested.connect(self._on_note_requested)
 
@@ -503,7 +505,7 @@ class MainWindow(QMainWindow):
     def _edit(self, pages: PageList, label: str, current: int, select: list[int]) -> None:
         if self.history is None:
             return
-        state = DocState(pages, self.history.current.annots)
+        state = replace(self.history.current, pages=pages)
         if state == self.history.current:
             return
         self.history.push(state, label)
@@ -515,6 +517,7 @@ class MainWindow(QMainWindow):
         pages_changed = state.pages != doc.pages
         doc.pages = state.pages
         doc.annots = state.annots
+        doc.fields = state.fields
         if pages_changed:
             current = max(0, min(len(state.pages) - 1, current))
             self.sidebar.set_document(doc)
@@ -535,7 +538,17 @@ class MainWindow(QMainWindow):
         if self.history is None:
             return
         current = self.history.current
-        state = DocState(current.pages, current.annots.with_page(key, annots))
+        state = replace(current, annots=current.annots.with_page(key, annots))
+        if state == current:
+            return
+        self.history.push(state, label)
+        self._show_state(state, self.view.current_page)
+
+    def _on_fields_edit(self, key, value: str, label: str) -> None:
+        if self.history is None:
+            return
+        current = self.history.current
+        state = replace(current, fields=current.fields.with_value(key, value))
         if state == current:
             return
         self.history.push(state, label)
@@ -859,7 +872,7 @@ class MainWindow(QMainWindow):
         while True:
             try:
                 return write_pdf(doc.sources, pages, dest, allow_decrypt=allowed,
-                                 annots=doc.annots), allowed
+                                 annots=doc.annots, fields=doc.fields), allowed
             except EncryptionWouldBeLost as exc:
                 if exc.file == 0 and self._same_file(dest, doc.path):
                     QMessageBox.warning(
@@ -894,7 +907,7 @@ class MainWindow(QMainWindow):
     def _save_to(self, dest: Path) -> bool:
         """Write, swap in, reopen."""
         doc = self.view.document
-        pages, annots = doc.pages, doc.annots
+        pages, annots, fields = doc.pages, doc.annots, doc.fields
         written = self._write(pages, dest, "Save failed")
         if written is None:
             return False
@@ -910,7 +923,7 @@ class MainWindow(QMainWindow):
             commit(tmp, dest)
         except SaveError as exc:
             if overwriting:
-                self._reopen(sources, keep_edits=DocState(pages, annots))
+                self._reopen(sources, keep_edits=DocState(pages, annots, fields))
             QMessageBox.critical(self, "Save failed", f"{exc}\n\nThe original file is unchanged.")
             return False
 
@@ -938,6 +951,7 @@ class MainWindow(QMainWindow):
             if keep_edits is not None:
                 document.pages = keep_edits.pages
                 document.annots = keep_edits.annots
+                document.fields = keep_edits.fields
         except Exception:
             document.close()
             raise

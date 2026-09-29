@@ -12,6 +12,7 @@ Acrobat, Edge and Chrome would each show a different note icon.
 
 from __future__ import annotations
 
+import functools
 import io
 import math
 import time
@@ -36,6 +37,7 @@ from .annots import (
     stamp_size,
     text_box_size,
 )
+from .formpdf import apply_field_edits, flatten_widgets, need_appearances
 from .textlayout import ASCENT, LEADING, PADDING, bold_text_width, layout, text_width
 
 
@@ -535,14 +537,43 @@ def overlay_args(doc, index: int):
     """
     edits = doc.annots.get(doc.page_key(index))
     forms = doc.page_has_forms(index)
+    ref = doc.pages[index]
+    filled = doc.fields.for_file(ref.file)
+    on_page = {w.name for w in doc.page_widgets(index)} if filled else set()
+    values = tuple(sorted((n, v) for n, v in filled.items() if n in on_page)) or None
     if edits is None:
-        if not (forms and doc.file_annots(index)):
+        if not (values or (forms and doc.file_annots(index))):
             return None
         edits = doc.file_annots(index)
-    ref = doc.pages[index]
     source = doc.sources[ref.file]
     media, crop, rotate = doc.page_geometry(index)
-    return (Path(source.path), source.password, ref.source, edits, media, crop, rotate, forms)
+    redraw = values is not None and any(
+        _needs_appearances(Path(s.path), s.password) for s in
+        (doc.sources[f] for f in {0} | {r.file for r in doc.pages}))
+    return (Path(source.path), source.password, ref.source, edits, media, crop, rotate, forms,
+            values, redraw)
+
+
+@functools.lru_cache(maxsize=16)
+def _needs_appearances_cached(path: str, mtime_ns: int, password):
+    with pikepdf.open(path, password=password or "") as pdf:
+        return need_appearances(pdf)
+
+
+def _needs_appearances(path: Path, password) -> bool:
+    """Whether the saved document will ask viewers to redraw fields: true
+    if any of its sources does (the writer's merge keeps the flag)."""
+    return _needs_appearances_cached(str(path), path.stat().st_mtime_ns, password)
+
+
+def _blank(out: pikepdf.Pdf, mediabox, cropbox, rotate) -> Dictionary:
+    out.add_blank_page()
+    page = out.pages[-1].obj
+    page.MediaBox = Array(list(mediabox))
+    page.CropBox = Array(list(cropbox))
+    if rotate:
+        page.Rotate = rotate
+    return page
 
 
 def overlay_pdf(
@@ -554,6 +585,8 @@ def overlay_pdf(
     cropbox: Tuple[float, float, float, float],
     rotate: int,
     drop_widgets: bool = False,
+    field_values=None,
+    redraw_fields: bool = False,
 ) -> bytes:
     """A one-page PDF holding only this page's annotations, edits applied.
 
@@ -569,12 +602,32 @@ def overlay_pdf(
     """
     with pikepdf.open(source, password=password or "") as src:
         out = pikepdf.Pdf.new()
-        out.add_blank_page()  # boxes replaced just below
-        page = out.pages[0].obj
-        page.MediaBox = Array(list(mediabox))
-        page.CropBox = Array(list(cropbox))
-        if rotate:
-            page.Rotate = rotate
+        if field_values:
+            # Page 1: the page's form widgets, values filled in by the same
+            # apply_field_edits the writer uses, flattened to stand-alone
+            # fields with a form of their own. pdfium's form engine draws it
+            # in place of the file's fields.
+            apply_field_edits(src, dict(field_values))
+            widgets, fields = flatten_widgets(src, src.pages[page_index].obj.get("/Annots") or [])
+            form_page = _blank(out, mediabox, cropbox, rotate)
+            copied = out.copy_foreign(src.make_indirect(Array([w for w in widgets if w is not None])))
+            form_page.Annots = copied
+            for w in copied:
+                w.P = form_page
+            src_form = src.Root.get("/AcroForm")
+            out.Root.AcroForm = Dictionary(Fields=Array(list(copied)))
+            if isinstance(src_form, Dictionary):
+                for key in ("/DR", "/DA", "/Q"):
+                    if key in src_form:
+                        value = src_form[key]
+                        if isinstance(value, (Dictionary, Array)):
+                            # copy_foreign only takes indirect objects
+                            value = out.copy_foreign(value if value.is_indirect
+                                                     else src.make_indirect(value))
+                        out.Root.AcroForm[key] = value
+            if redraw_fields:
+                out.Root.AcroForm.NeedAppearances = True
+        page = _blank(out, mediabox, cropbox, rotate)
 
         src_annots = src.pages[page_index].obj.get("/Annots")
         if isinstance(src_annots, Array):

@@ -406,7 +406,9 @@ class ThumbnailSidebar(QListWidget):
         # The page's annotation edits are in the key, so annotating a page
         # re-renders its thumbnail and undo gets the old one back from cache.
         doc = self.document
+        fields = doc.fields.for_file(doc.pages[index].file) if doc.fields else None
         return (doc.pages[index], doc.annots.get(doc.page_key(index)),
+                tuple(sorted(fields.items())) if fields else None,
                 int(round(self.devicePixelRatioF() * 100)))
 
     def _cached(self, index: int) -> Optional[QPixmap]:

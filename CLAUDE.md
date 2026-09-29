@@ -30,6 +30,9 @@ pdfapp/
   annotpdf.py    Annotation edits -> PDF (pikepdf): apply_edits, new-annot APs,
                  overlay_pdf for the live preview.
   textlayout.py  Helvetica metrics, wrapping, DA parsing for text boxes. No libs.
+  fields.py      Form field model (Widget, FieldEdits by (file, full name)). No libs.
+  formpdf.py     Field values -> PDF (pikepdf): /V, /AS, text-field APs, widget
+                 flattening for the preview. Never touches /NeedAppearances.
   document.py    pypdfium2 wrapper. NO Qt imports -- must stay headless-testable.
                  Takes *displayed* indices; maps them through its PageList to a
                  page of one of its sources. Sources are only ever added.
@@ -182,6 +185,18 @@ Rejected plain) place once then return to Select, upright on rotated pages
 like text. Shape style menu: colour + 1-8pt width. Lines and ink hit-test
 along the stroke. Rectangles/ellipses resize at any rotation, file ones
 redrawn in their own /C, width and /IC. Author = Windows login name.
+
+Stage 5a, form filling (Select tool): click a text field to type in place
+(Enter / Esc finish; Tab / Shift+Tab next / previous text field; multi-line
+fields take Enter as a newline), click check boxes / radios to toggle,
+combo boxes pop a menu, read-only fields say so. Values are FieldEdits in
+DocState, applied by the writer to each source BEFORE page copying (names
+still original). Button values are on-state names (/AS); /Opt export
+values are mapped back by formpdf. Preview: the overlay gets a first page
+of the page's widgets (values applied by the same apply_field_edits,
+flattened) that pdfium's form engine draws in place of the file's fields,
+with /NeedAppearances set as the saved file will have it (pdfium redraws
+fields when it's set -- measured). Verified on the user's real form.
 
 Next, in order (user chose all of these): shapes, ink, stamps;
 authoring fillable form fields; form filling; encryption; OCR for scanned

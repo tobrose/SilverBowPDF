@@ -82,8 +82,13 @@ class PageRenderer:
         # Quantise the scale so that float noise from fit calculations doesn't
         # produce a cache miss on every repaint. The page's annotation edits
         # are part of the key, so an edit is never served a stale image.
-        edits = self.document.annots.get(self.document.page_key(index))
-        return (index, int(round(scale * 1000)), rotation % 360, edits)
+        doc = self.document
+        edits = doc.annots.get(doc.page_key(index))
+        # Field values anywhere in the file can show on this page; the whole
+        # (small) set is part of the key rather than working out which.
+        fields = doc.fields.for_file(doc.pages[index].file) if doc.fields else None
+        return (index, int(round(scale * 1000)), rotation % 360, edits,
+                tuple(sorted(fields.items())) if fields else None)
 
     def _overlay(self, index: int) -> Optional[bytes]:
         """The page's edited annotations as a one-page PDF, or None if the
@@ -133,9 +138,9 @@ class PageRenderer:
 
 @functools.lru_cache(maxsize=32)
 def _cached_overlay(path, mtime_ns, size, password, page_index, edits, media, crop, rotate,
-                    drop_widgets):
+                    drop_widgets, field_values, redraw_fields):
     """Shared by every renderer (page view, thumbnails), so one edit builds
     its overlay once. mtime and size are in the key so an overlay built from
     a file's old contents is never reused after that file is saved over."""
     return overlay_pdf(Path(path), password, page_index, edits, media, crop, rotate,
-                       drop_widgets)
+                       drop_widgets, field_values, redraw_fields)

@@ -27,6 +27,8 @@ import pikepdf
 
 from .annotpdf import apply_edits
 from .annots import AnnotEdits
+from .fields import FieldEdits
+from .formpdf import apply_field_edits
 from .pagelist import PageList
 
 
@@ -64,6 +66,7 @@ def write_pdf(
     dest: str | Path,
     allow_decrypt: Collection[int] = (),
     annots: AnnotEdits = AnnotEdits(),
+    fields: FieldEdits = FieldEdits(),
 ) -> Path:
     """Build the edited PDF into a temp file beside `dest` and return its path.
 
@@ -76,6 +79,7 @@ def write_pdf(
     unprotected. Any other encrypted source raises EncryptionWouldBeLost.
 
     annots: annotation edits per (file, source page); see annots.py.
+    fields: filled-in form values per (file, field name); see fields.py.
     """
     dest = Path(dest)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{dest.stem}.", suffix=".tmp", dir=dest.parent)
@@ -97,6 +101,9 @@ def write_pdf(
                         f"the edit refers to page {highest + 1}. Was the file changed "
                         f"by another program?"
                     )
+                # Values in before anything is copied: field names are the
+                # source's own until _merge_forms renames clashes.
+                apply_field_edits(pdf, fields.for_file(f))
                 pdfs[f] = pdf
             base = pdfs[0]
 

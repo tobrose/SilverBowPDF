@@ -49,6 +49,7 @@ on a headless box.
 | Drag a text box's edge or corner | Resize it; the text re-wraps |
 | `R` / `E` / `L` / `A` / `P` | Rectangle / Ellipse / Line / Arrow / Pen -- drag to draw; `Shift` squares or snaps to 45 degrees |
 | Stamp button | Pick a stamp, click to place it |
+| Click a form field | Type into it (`Tab` for the next field), tick a box, or pick from a list |
 | Click, drag, `Delete` | Select, move, delete an annotation |
 | Double-click an annotation | Edit its comment |
 | `PgUp` `PgDn` `Ctrl+Home` `Ctrl+End` `Ctrl+G` | Navigation |

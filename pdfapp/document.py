@@ -11,6 +11,7 @@ import pypdfium2 as pdfium
 import pypdfium2.raw as pdfium_c
 
 from .annots import MARKUP_KINDS, Annot, AnnotEdits, PageKey, is_editable
+from .fields import CHECKBOX, COMBO, RADIO, TEXT, FieldEdits, Widget
 from .pagelist import PageList, PageRef
 from .textlayout import parse_da
 from .transform import PageTransform, normalize_rotation
@@ -109,7 +110,9 @@ class PdfDocument:
         self._sources: List[_Source] = [_open_source(Path(path), password)]
         self._pages = PageList.identity(self._sources[0].page_count)
         self._annots = AnnotEdits()
+        self._fields = FieldEdits()
         self._file_annots: Dict[PageKey, Tuple[Annot, ...]] = {}
+        self._widgets: Dict[PageKey, Tuple[Widget, ...]] = {}
         self._closed = False
 
     # ---- lifecycle -----------------------------------------------------
@@ -199,6 +202,44 @@ class PdfDocument:
     @annots.setter
     def annots(self, annots: AnnotEdits) -> None:
         self._annots = annots
+
+    @property
+    def fields(self) -> FieldEdits:
+        return self._fields
+
+    @fields.setter
+    def fields(self, fields: FieldEdits) -> None:
+        self._fields = fields
+
+    def page_widgets(self, index: int) -> Tuple[Widget, ...]:
+        """The page's form widgets as the file has them (values included).
+        Read through pdfium's form API, which resolves inherited field
+        attributes and names; origin lines up with /Annots like annotations."""
+        key = self.page_key(index)
+        cached = self._widgets.get(key)
+        if cached is not None:
+            return cached
+        source = self._source(index)
+        formenv = source.pdf.formenv if source.has_forms else None
+        found: List[Widget] = []
+        if formenv:
+            page = self._page(index)
+            for i in range(pdfium_c.FPDFPage_GetAnnotCount(page)):
+                handle = pdfium_c.FPDFPage_GetAnnot(page, i)
+                if not handle:
+                    continue
+                try:
+                    if pdfium_c.FPDFAnnot_GetSubtype(handle) != pdfium_c.FPDF_ANNOT_WIDGET:
+                        continue
+                    rect = pdfium_c.FS_RECTF()
+                    if not pdfium_c.FPDFAnnot_GetRect(handle, rect):
+                        continue
+                    found.append(_read_widget(formenv, handle, i, rect))
+                finally:
+                    pdfium_c.FPDFPage_CloseAnnot(handle)
+        result = tuple(found)
+        self._widgets[key] = result
+        return result
 
     def page_key(self, index: int) -> PageKey:
         ref = self._pages[index]
@@ -472,12 +513,25 @@ class PdfDocument:
         # Exactly the placement page.render used (no crop): origin, full
         # size, rotation as a quarter-turn count.
         placement = (0, 0, bitmap.width, bitmap.height, rotation // 90)
-        formenv = getattr(page, "formenv", None)
-        if source.has_forms and formenv:
-            pdfium_c.FPDF_FFLDraw(formenv, bitmap, page, *placement, pdfium_c.FPDF_ANNOT)
         overlay_doc = pdfium.PdfDocument(overlay)
         try:
-            overlay_page = overlay_doc[0]
+            if len(overlay_doc) == 2:
+                # Filled-in fields: the overlay's first page holds this page's
+                # widgets with the new values; its form engine draws them.
+                overlay_doc.init_forms()
+                pdfium_c.FPDF_SetFormFieldHighlightColor(overlay_doc.formenv, 0, FIELD_HIGHLIGHT)
+                pdfium_c.FPDF_SetFormFieldHighlightAlpha(overlay_doc.formenv, FIELD_HIGHLIGHT_ALPHA)
+                form_page = overlay_doc[0]
+                try:
+                    pdfium_c.FPDF_FFLDraw(overlay_doc.formenv, bitmap, form_page, *placement,
+                                          pdfium_c.FPDF_ANNOT)
+                finally:
+                    form_page.close()
+            else:
+                formenv = getattr(page, "formenv", None)
+                if source.has_forms and formenv:
+                    pdfium_c.FPDF_FFLDraw(formenv, bitmap, page, *placement, pdfium_c.FPDF_ANNOT)
+            overlay_page = overlay_doc[len(overlay_doc) - 1]
             try:
                 pdfium_c.FPDF_RenderPageBitmap(bitmap, overlay_page, *placement,
                                                pdfium_c.FPDF_ANNOT)
@@ -486,6 +540,43 @@ class PdfDocument:
         finally:
             overlay_doc.close()
         return bitmap
+
+
+_FIELD_KINDS = {
+    pdfium_c.FPDF_FORMFIELD_TEXTFIELD: TEXT, pdfium_c.FPDF_FORMFIELD_CHECKBOX: CHECKBOX,
+    pdfium_c.FPDF_FORMFIELD_RADIOBUTTON: RADIO, pdfium_c.FPDF_FORMFIELD_COMBOBOX: COMBO,
+}
+
+
+def _form_string(func, formenv, handle, *args) -> str:
+    size = func(formenv, handle, *args, None, 0)
+    if size <= 2:
+        return ""
+    buffer = ctypes.create_string_buffer(size)
+    func(formenv, handle, *args, ctypes.cast(buffer, ctypes.POINTER(pdfium_c.FPDF_WCHAR)), size)
+    return buffer.raw[:size - 2].decode("utf-16-le", errors="replace")
+
+
+def _read_widget(formenv, handle, index: int, rect) -> Widget:
+    kind = _FIELD_KINDS.get(pdfium_c.FPDFAnnot_GetFormFieldType(formenv, handle), "other")
+    flags = pdfium_c.FPDFAnnot_GetFormFieldFlags(formenv, handle)
+    name = _form_string(pdfium_c.FPDFAnnot_GetFormFieldName, formenv, handle)
+    value = _form_string(pdfium_c.FPDFAnnot_GetFormFieldValue, formenv, handle)
+    on_state, options = "", ()
+    if kind in (CHECKBOX, RADIO):
+        # pdfium can't list /AP /N state names, but the export value IS the
+        # on-state name unless the field has /Opt -- and for /Opt fields the
+        # writer maps export values back to real state names (formpdf).
+        on_state = _form_string(pdfium_c.FPDFAnnot_GetFormFieldExportValue, formenv, handle)
+        value = on_state if pdfium_c.FPDFAnnot_IsChecked(formenv, handle) else "Off"
+    elif kind == COMBO:
+        options = tuple(
+            _form_string(pdfium_c.FPDFAnnot_GetOptionLabel, formenv, handle, n)
+            for n in range(max(0, pdfium_c.FPDFAnnot_GetOptionCount(formenv, handle))))
+    size = ctypes.c_float(0.0)
+    font_size = size.value if pdfium_c.FPDFAnnot_GetFontSize(formenv, handle, size) else 0.0
+    return Widget(index, (rect.left, rect.bottom, rect.right, rect.top), name, kind, flags,
+                  value, on_state, options, font_size)
 
 
 def _line_points(handle) -> Tuple[float, ...]:

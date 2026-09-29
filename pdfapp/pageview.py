@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QFrame,
     QLabel,
+    QMenu,
     QPlainTextEdit,
     QScrollArea,
     QSizePolicy,
@@ -49,6 +50,7 @@ from .annots import (
     text_box_size,
     without,
 )
+from .fields import CHECKBOX, COMBO, RADIO, TEXT, Widget, auto_font_size, current_value, is_on
 from .textlayout import PADDING, encodable, layout
 from .document import PdfDocument
 from .rendering import PageRenderer
@@ -97,6 +99,52 @@ _EDGE_CURSORS = {
     "lt": Qt.SizeFDiagCursor, "rb": Qt.SizeFDiagCursor, "rt": Qt.SizeBDiagCursor,
     "lb": Qt.SizeBDiagCursor,
 }
+
+
+class _FieldEditor(QPlainTextEdit):
+    """In-place editor for a form text field. Enter finishes a one-line
+    field; Tab / Shift+Tab finish and move to the next / previous field."""
+
+    finished = Signal(int)  # 0 done, +1 next field, -1 previous field
+
+    def __init__(self, parent, multiline: bool):
+        super().__init__(parent)
+        self.setFrameShape(QFrame.NoFrame)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setLineWrapMode(QPlainTextEdit.WidgetWidth if multiline else QPlainTextEdit.NoWrap)
+        self._multiline = multiline
+        self._done = False
+
+    def keyPressEvent(self, event) -> None:
+        key = event.key()
+        if key == Qt.Key_Backtab or (key == Qt.Key_Tab and event.modifiers() & Qt.ShiftModifier):
+            self.finish(-1)
+        elif key == Qt.Key_Tab:
+            self.finish(+1)
+        elif key == Qt.Key_Escape:
+            self.finish(0)
+        elif key in (Qt.Key_Return, Qt.Key_Enter) and (
+                not self._multiline or event.modifiers() & Qt.ControlModifier):
+            self.finish(0)
+        else:
+            super().keyPressEvent(event)
+
+    def focusNextPrevChild(self, forward: bool) -> bool:
+        return False  # Tab is ours, not Qt's focus chain
+
+    def focusOutEvent(self, event) -> None:
+        super().focusOutEvent(event)
+        self.finish(0)
+
+    def finish(self, move: int) -> None:
+        if not self._done:
+            self._done = True
+            self.finished.emit(move)
+
+    def reopen(self) -> None:
+        self._done = False
+        self.setFocus()
 
 
 class _TextEditor(QPlainTextEdit):
@@ -246,7 +294,8 @@ class PdfView(QScrollArea):
     note_requested = Signal(int, float, float) # page index, PDF x, y
     tool_changed = Signal(object)              # Tool
     text_selection_changed = Signal(bool)      # whether any text is selected
-    editing_changed = Signal(bool)             # a text box editor is open
+    editing_changed = Signal(bool)             # a text box / field editor is open
+    fields_edit = Signal(object, str, str)     # field key, new value, undo label
     message = Signal(str)                      # something the user should know
 
     def __init__(self, parent=None):
@@ -269,6 +318,7 @@ class PdfView(QScrollArea):
         self.shape_width = 2.0
         self.stamp = STAMPS[0]  # (label, colour, dated, /Name)
         self._editor = None     # open text box editor, see _open_editor
+        self._field_editor = None  # open form field editor, see _open_field
         self.author = getpass.getuser()  # /T on annotations created here
         self.setFocusPolicy(Qt.StrongFocus)  # Delete and Esc for annotations
 
@@ -432,6 +482,10 @@ class PdfView(QScrollArea):
             # not start another box, not select what's under the click.
             self.commit_text_edit()
             return True
+        if self._field_editor is not None:
+            # Finishing a field and clicking straight into the next one is
+            # how forms get filled, so here the click carries on.
+            self.commit_field_edit()
         self.setFocus(Qt.MouseFocusReason)
         pos = event.position().toPoint()
         if self._tool is Tool.NOTE:
@@ -462,6 +516,13 @@ class PdfView(QScrollArea):
                           "press": pos, "start": (left, top, right, bottom), "rect": None}
             return True
         annot = None if self._tool in MARKUP_TOOLS else self._annot_at(page, pos)
+        if annot is None and self._tool is Tool.SELECT:
+            widget = self._widget_at(page, pos, fillable_only=False)
+            if widget is not None:
+                self.select_annot(page.index, None)
+                self.clear_text_selection()
+                self._fill(page, widget)
+                return True
         self.select_annot(page.index, annot.ident if annot else None)
         if annot is not None and not annot.is_markup:
             self.clear_text_selection()
@@ -530,8 +591,11 @@ class PdfView(QScrollArea):
             QToolTip.hideText()
             return
         annot = self._annot_at(page, pos)
+        widget = None if annot is not None else self._widget_at(page, pos)
         if annot is not None and not annot.is_markup:
             page.setCursor(Qt.SizeAllCursor)
+        elif widget is not None:
+            page.setCursor(Qt.IBeamCursor if widget.kind == TEXT else Qt.PointingHandCursor)
         elif self._char_near(page, pos, exact=True) >= 0:
             page.setCursor(Qt.IBeamCursor)
         else:
@@ -780,7 +844,124 @@ class PdfView(QScrollArea):
     # -- text boxes: typed in place, committed as a FreeText annotation
 
     def is_editing(self) -> bool:
-        return self._editor is not None
+        return self._editor is not None or self._field_editor is not None
+
+    # -- form fields: filled in place, committed as FieldEdits
+
+    def _widget_at(self, page: "PageWidget", pos: QPoint, fillable_only: bool = True):
+        doc = self.document
+        if doc is None or not doc.page_has_forms(page.index):
+            return None
+        x, y = page.pdf_point_at(pos)
+        for widget in reversed(doc.page_widgets(page.index)):
+            if widget.contains(x, y) and widget.kind in (TEXT, CHECKBOX, RADIO, COMBO):
+                if widget.fillable or not fillable_only:
+                    return widget
+        return None
+
+    def _field_key(self, index: int, widget: Widget):
+        return (self.document.pages[index].file, widget.name)
+
+    def _fill(self, page: "PageWidget", widget: Widget) -> None:
+        doc = self.document
+        if not widget.fillable:
+            self.message.emit(f"\u201c{widget.short_name()}\u201d is read-only.")
+            return
+        file = doc.pages[page.index].file
+        key = self._field_key(page.index, widget)
+        if widget.kind == TEXT:
+            self._open_field(page, widget)
+        elif widget.kind == CHECKBOX:
+            on = is_on(widget, file, doc.fields)
+            self.fields_edit.emit(key, "Off" if on else widget.on_state,
+                                  f"{'Uncheck' if on else 'Check'} {widget.short_name()}")
+        elif widget.kind == RADIO:
+            if not is_on(widget, file, doc.fields):
+                self.fields_edit.emit(key, widget.on_state,
+                                      f"Choose {widget.on_state} for {widget.short_name()}")
+        elif widget.kind == COMBO and widget.options:
+            menu = QMenu(self)
+            current = current_value(widget, file, doc.fields)
+            for option in widget.options:
+                act = menu.addAction(option)
+                act.setCheckable(True)
+                act.setChecked(option == current)
+            left, top, right, bottom = page.widget_transform().pdf_rect_to_widget(widget.rect)
+            chosen = menu.exec(page.mapToGlobal(QPoint(round(left), round(bottom))))
+            if chosen is not None and chosen.text() != current:
+                self.fields_edit.emit(key, chosen.text(), f"Choose {widget.short_name()}")
+
+    def _open_field(self, page: "PageWidget", widget: Widget) -> None:
+        self.commit_text_edit()
+        self.commit_field_edit()
+        doc = self.document
+        file = doc.pages[page.index].file
+        value = current_value(widget, file, doc.fields)
+        left, top, right, bottom = page.widget_transform().pdf_rect_to_widget(widget.rect)
+        scale = page.widget_transform().scale
+        x0, y0, x1, y1 = widget.rect
+        size = widget.font_size or auto_font_size(value, x1 - x0, y1 - y0, widget.multiline)
+        editor = _FieldEditor(page, widget.multiline)
+        font = QFont("Arial")  # Helvetica's metric twin, as the saved field uses
+        font.setPixelSize(max(1, round(size * scale)))
+        editor.setFont(font)
+        editor.document().setDocumentMargin(max(1.0, 1.5 * scale))
+        editor.setStyleSheet("QPlainTextEdit { background: white; color: black;"
+                             " border: 2px solid rgb(40,110,230); }")
+        editor.setPlainText(value)
+        editor.setGeometry(round(left), round(top), max(12, round(right - left)),
+                           max(12, round(bottom - top)))
+        self._field_editor = {"page": page, "widget": widget, "editor": editor, "value": value}
+        editor.finished.connect(self._field_finished)
+        editor.show()
+        editor.setFocus()
+        editor.selectAll()
+        self.editing_changed.emit(True)
+
+    def _field_finished(self, move: int) -> None:
+        ed = self._field_editor
+        if ed is None:
+            return
+        page, widget = ed["page"], ed["widget"]
+        if not self.commit_field_edit() or move == 0:
+            return
+        # Tab / Shift+Tab: the next or previous fillable text field, in
+        # page order and then the order the form lists them.
+        order = [(p.index, w) for p in self._pages
+                 for w in self.document.page_widgets(p.index) if w.kind == TEXT and w.fillable]
+        here = next((n for n, (i, w) in enumerate(order)
+                     if i == page.index and w.origin == widget.origin), None)
+        if here is None or not order:
+            return
+        index, nxt = order[(here + move) % len(order)]
+        if index != page.index:
+            self.scroll_to_page(index)
+        self._open_field(self._pages[index], nxt)
+
+    def commit_field_edit(self) -> bool:
+        """Close the field editor, turning what was typed into a value.
+        False if it stayed open (text the field's font can't hold)."""
+        ed = self._field_editor
+        if ed is None:
+            return True
+        editor, widget, page = ed["editor"], ed["widget"], ed["page"]
+        text = editor.toPlainText()
+        if not widget.multiline:
+            text = text.replace("\n", " ")
+        if not encodable(text):
+            self.message.emit("Only Western European characters can be typed into this "
+                              "field for now; please remove the others.")
+            editor.reopen()
+            return False
+        self._field_editor = None
+        editor.hide()
+        editor.deleteLater()
+        self.setFocus(Qt.OtherFocusReason)
+        self.editing_changed.emit(False)
+        if self.document is not None and page.document is self.document and text != ed["value"]:
+            self.fields_edit.emit(self._field_key(page.index, widget), text,
+                                  f"Fill {widget.short_name()}")
+        return True
 
     def _new_text(self, page: "PageWidget", pos: QPoint, boxed: bool, width) -> None:
         self._open_editor(page, pos, None, "", self.text_size, self.text_color, boxed, width)
@@ -959,6 +1140,7 @@ class PdfView(QScrollArea):
         the same file after a save, which shouldn't feel like opening it.
         """
         self.commit_text_edit()
+        self.commit_field_edit()
         if self.document is not None:
             self.document.close()
         self.document = document
@@ -984,6 +1166,8 @@ class PdfView(QScrollArea):
         if self.document is None:
             return
         self.commit_text_edit()
+        self.commit_field_edit()
+        self.commit_field_edit()
         if self.renderer is not None:
             self.renderer.clear()  # cache is keyed by displayed index, now stale
         self.clear_text_selection()  # indexes a page that may have moved
@@ -1044,6 +1228,7 @@ class PdfView(QScrollArea):
         if abs(scale - self._scale) < 1e-6 and fit == self._fit:
             return
         self.commit_text_edit()  # the editor is sized for the old zoom
+        self.commit_field_edit()
 
         hbar, vbar = self.horizontalScrollBar(), self.verticalScrollBar()
         if anchor is None:
@@ -1133,6 +1318,7 @@ class PdfView(QScrollArea):
         if self.document is None:
             return
         self.commit_text_edit()
+        self.commit_field_edit()
         self._rotation = normalize_rotation(self._rotation + delta)
         if self.renderer is not None:
             self.renderer.clear()
