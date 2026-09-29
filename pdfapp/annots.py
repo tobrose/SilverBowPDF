@@ -318,7 +318,6 @@ def lay_markup(annots: Iterable[Annot], new: Annot,
 
 TEXT_COLORS = {"Black": (0.0, 0.0, 0.0), "Blue": (0.1, 0.25, 0.8), "Red": (0.8, 0.1, 0.1)}
 TEXT_SIZES = (8, 10, 12, 14, 18, 24)
-TEXT_BOX_WIDTH = 200.0  # points, a Text Box made by a click rather than a drag
 
 
 def text_box_size(annot: Annot) -> Tuple[float, float]:

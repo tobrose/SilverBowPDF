@@ -21,6 +21,7 @@ from PySide6.QtGui import (QColor, QFont, QIcon, QPainter, QPainterPath, QPen, Q
                            QTextCursor, QWheelEvent)
 from PySide6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -38,8 +39,8 @@ from .annots import (
     HIGHLIGHT_COLORS,
     SHAPE_COLORS,
     STAMPS,
-    TEXT_BOX_WIDTH,
     TEXT_COLORS,
+    TEXT_SIZES,
     Annot,
     describe,
     describe_annot,
@@ -93,7 +94,6 @@ class Tool(Enum):
     UNDERLINE = "underline"
     STRIKEOUT = "strikeout"
     TYPEWRITER = "typewriter"
-    TEXTBOX = "textbox"
     RECT = "rect"
     ELLIPSE = "ellipse"
     LINE = "line"
@@ -110,7 +110,9 @@ class Tool(Enum):
 # Tools that mark text: drag across it, a markup annotation lands on release.
 MARKUP_TOOLS = {Tool.HIGHLIGHT: "Highlight", Tool.UNDERLINE: "Underline",
                 Tool.STRIKEOUT: "StrikeOut"}
-TEXT_TOOLS = (Tool.TYPEWRITER, Tool.TEXTBOX)
+# Typewriter only: the separate Text Box tool was removed (user's call).
+# Bordered boxes from files, or made before, still open and resize.
+TEXT_TOOLS = (Tool.TYPEWRITER,)
 # Drag to draw. Shapes return to Select once drawn; the pen stays until Esc.
 DRAW_TOOLS = (Tool.RECT, Tool.ELLIPSE, Tool.LINE, Tool.ARROW, Tool.PEN)
 RESIZABLE_SHAPES = ("Square", "Circle")
@@ -208,40 +210,98 @@ class _TextEditor(QPlainTextEdit):
         self.setFocus()
 
 
-class _MarkBar(QFrame):
-    """Highlight / Underline / Strikethrough buttons under fresh text
-    selection (Select tool). A child of the page, not a popup window: it
-    scrolls with the page, can't grab the next click, and costs a remote desktop one
-    small repaint. Buttons take no focus, so keys still reach the view."""
+def _swatch_icon(color, size: int = 12) -> QIcon:
+    pixmap = QPixmap(size, size)
+    pixmap.fill(QColor.fromRgbF(*color))
+    return QIcon(pixmap)
 
-    chosen = Signal(str)  # "Highlight" | "Underline" | "StrikeOut"
 
-    def __init__(self, parent, highlight_color):
+class _Bar(QFrame):
+    """A small row of buttons floating by the text: the mark bar under a
+    selection, the style bar over the typewriter. A child of the scrolling
+    page column, not a popup window -- it scrolls with the page, can't grab
+    the next click, and costs a remote desktop one small repaint -- and not of the page
+    itself, which would clip it when zoomed out narrower than the bar. Its
+    buttons never take focus, so keys stay with the view, and a text editor
+    being typed in keeps its caret."""
+
+    def __init__(self, parent):
         super().__init__(parent)
-        self.setObjectName("markbar")
+        self.setObjectName("bar")
         # Explicit colours throughout: the viewport's dark stylesheet
         # cascades to every child otherwise.
         self.setStyleSheet(
-            "#markbar { background: #ffffff; border: 1px solid #9a9aa2; border-radius: 4px; }"
-            "QToolButton { background: transparent; color: #1e1e1e; border: none;"
-            " border-radius: 3px; padding: 3px 8px; }"
+            "#bar { background: #ffffff; border: 1px solid #9a9aa2; border-radius: 4px; }"
+            "QToolButton { background: transparent; color: #1e1e1e; border: 1px solid transparent;"
+            " border-radius: 3px; padding: 3px 6px; }"
             "QToolButton:hover { background: #e3ecfb; }"
-            "QToolButton:pressed { background: #c9dbf7; }")
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(3, 2, 3, 2)
-        layout.setSpacing(2)
-        swatch = QPixmap(12, 12)
-        swatch.fill(QColor.fromRgbF(*highlight_color))
-        for kind, label, icon in (("Highlight", "Highlight", QIcon(swatch)),
-                                  ("Underline", "Underline", None),
-                                  ("StrikeOut", "Strikethrough", None)):
-            button = QToolButton(self, text=label, autoRaise=True, focusPolicy=Qt.NoFocus)
-            if icon is not None:
-                button.setIcon(icon)
-                button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-            button.setCursor(Qt.PointingHandCursor)
-            button.clicked.connect(lambda _=False, k=kind: self.chosen.emit(k))
-            layout.addWidget(button)
+            "QToolButton:pressed { background: #c9dbf7; }"
+            "QToolButton:checked { border-color: #2868e6; background: #e3ecfb; }"
+            "QLabel { color: #5a5a60; background: transparent; padding: 0 2px 0 4px; }")
+        self._row = QHBoxLayout(self)
+        self._row.setContentsMargins(3, 2, 3, 2)
+        self._row.setSpacing(1)
+
+    def button(self, text: str = "", icon: Optional[QIcon] = None, tip: str = "",
+               checked: Optional[bool] = None) -> QToolButton:
+        b = QToolButton(self, text=text, autoRaise=True, focusPolicy=Qt.NoFocus, toolTip=tip)
+        if icon is not None:
+            b.setIcon(icon)
+            b.setToolButtonStyle(Qt.ToolButtonTextBesideIcon if text else Qt.ToolButtonIconOnly)
+        if checked is not None:
+            b.setCheckable(True)
+            b.setChecked(checked)
+        b.setCursor(Qt.PointingHandCursor)
+        self._row.addWidget(b)
+        return b
+
+    def label(self, text: str) -> None:
+        self._row.addWidget(QLabel(text, self))
+
+    def gap(self) -> None:
+        self._row.addSpacing(8)
+
+
+class _MarkBar(_Bar):
+    """Under a fresh text selection (Select tool): Highlight in the current
+    colour or one of the others, Underline, Strikethrough."""
+
+    chosen = Signal(str, object)  # kind, highlight colour (None: current / not a highlight)
+
+    def __init__(self, parent, highlight_color):
+        super().__init__(parent)
+        self.button("Highlight", _swatch_icon(highlight_color),
+                    "Highlight in the current colour").clicked.connect(
+            lambda: self.chosen.emit("Highlight", None))
+        for name, color in HIGHLIGHT_COLORS.items():
+            self.button(icon=_swatch_icon(color), tip=f"Highlight {name.lower()}").clicked.connect(
+                lambda _=False, c=color: self.chosen.emit("Highlight", c))
+        self.gap()
+        self.button("Underline").clicked.connect(lambda: self.chosen.emit("Underline", None))
+        self.button("Strikethrough").clicked.connect(lambda: self.chosen.emit("StrikeOut", None))
+        self.adjustSize()
+
+
+class _StyleBar(_Bar):
+    """Over the typewriter while typing: text colour and size. Changing
+    them restyles what's being typed, and becomes the default for the next."""
+
+    chosen = Signal(object, object)  # size or None, colour or None
+
+    def __init__(self, parent, size: float, color):
+        super().__init__(parent)
+        colors, sizes = QButtonGroup(self), QButtonGroup(self)  # one ticked in each
+        self.label("Colour")
+        for name, c in TEXT_COLORS.items():
+            b = self.button(icon=_swatch_icon(c, 14), tip=name, checked=tuple(c) == tuple(color))
+            colors.addButton(b)
+            b.clicked.connect(lambda _=False, c=c: self.chosen.emit(None, c))
+        self.gap()
+        self.label("Size")
+        for s in TEXT_SIZES:
+            b = self.button(str(s), tip=f"{s} pt", checked=abs(s - size) < 0.01)
+            sizes.addButton(b)
+            b.clicked.connect(lambda _=False, s=s: self.chosen.emit(float(s), None))
         self.adjustSize()
 
 
@@ -362,6 +422,8 @@ class PdfView(QScrollArea):
     field_properties = Signal(int, object)     # page index, Widget (double-clicked)
     message = Signal(str)                      # something the user should know
     pages_rebuilt = Signal()                   # displayed indices may now mean other pages
+    highlight_color_changed = Signal(object)   # picked on the mark bar
+    text_style_changed = Signal()              # text_size / text_color, picked on the style bar
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -517,23 +579,27 @@ class PdfView(QScrollArea):
         if self._tool is not Tool.SELECT or self._text_sel is None:
             return
         index, start, end = self._text_sel
-        rects = [self._widget_rect(self._pages[index], r)
+        page = self._pages[index]
+        rects = [self._widget_rect(page, r).translated(QPointF(page.pos()))
                  for r in self.document.text_rects(index, start, end)]
         if not rects:
             return
-        page = self._pages[index]
-        bar = _MarkBar(page, self.highlight_color)
+        bar = _MarkBar(self._container, self.highlight_color)
         bar.chosen.connect(self._mark_from_bar)
         gap = 6
         x = rects[-1].center().x() - bar.width() / 2
         y = max(r.bottom() for r in rects) + gap
-        if y + bar.height() > page.height() - 4:
+        if y + bar.height() > page.geometry().bottom() - 4:
             y = min(r.top() for r in rects) - gap - bar.height()
-        x = max(4, min(x, page.width() - bar.width() - 4))
-        y = max(4, min(y, page.height() - bar.height() - 4))
-        bar.move(int(x), int(y))
+        bar.move(*self._clamped(bar, x, y))
         bar.show()
         self._mark_bar = bar
+
+    def _clamped(self, bar: QWidget, x: float, y: float):
+        """Keep a bar inside the page column (it's a child of it)."""
+        area = self._container
+        return (int(max(4, min(x, area.width() - bar.width() - 4))),
+                int(max(4, min(y, area.height() - bar.height() - 4))))
 
     def _hide_mark_bar(self) -> None:
         if self._mark_bar is not None:
@@ -541,7 +607,10 @@ class PdfView(QScrollArea):
             self._mark_bar.deleteLater()
             self._mark_bar = None
 
-    def _mark_from_bar(self, kind: str) -> None:
+    def _mark_from_bar(self, kind: str, color) -> None:
+        if color is not None and color != self.highlight_color:
+            self.highlight_color = color  # the swatch picked becomes the current colour
+            self.highlight_color_changed.emit(color)
         self.mark_selection(kind)  # clears the selection, and with it the bar
         self.setFocus(Qt.OtherFocusReason)
 
@@ -779,9 +848,6 @@ class PdfView(QScrollArea):
                 page.update()
                 return True
             if drag["mode"] == "place":
-                if self._tool is Tool.TEXTBOX:
-                    drag["end"] = pos
-                    page.update()
                 return True
             if drag["mode"] == "move":
                 x, y = page.pdf_point_at(pos)
@@ -868,18 +934,7 @@ class PdfView(QScrollArea):
             page.update()
             return True
         if drag["mode"] == "place":
-            press = drag["press"]
-            if self._tool is Tool.TEXTBOX:
-                scale = page.widget_transform().scale
-                end = drag["end"]
-                if end is not None and abs(end.x() - press.x()) / scale >= 40:
-                    width = abs(end.x() - press.x()) / scale
-                    press = QPoint(min(end.x(), press.x()), press.y())
-                else:
-                    width = TEXT_BOX_WIDTH
-                self._new_text(page, press, boxed=True, width=width)
-            else:
-                self._new_text(page, press, boxed=False, width=None)
+            self._new_text(page, drag["press"], boxed=False, width=None)
             page.update()
             return True
         if drag["mode"] == "move":
@@ -1386,40 +1441,73 @@ class PdfView(QScrollArea):
 
     def _open_editor(self, page, anchor: QPoint, annot, text, size, color, boxed, width) -> None:
         self.commit_text_edit()
-        scale = page.widget_transform().scale
         editor = _TextEditor(page)
-        font = QFont("Arial")  # Helvetica's metric twin: wraps where the PDF will
-        font.setPixelSize(max(1, round(size * scale)))
-        editor.setFont(font)
-        editor.document().setDocumentMargin(PADDING * scale)
-        r, g, b = (round(c * 255) for c in color)
-        editor.setStyleSheet(
-            f"QPlainTextEdit {{ color: rgb({r},{g},{b}); background: rgba(255,255,255,215);"
-            f" border: 1px dashed rgb(40,110,230); }}")
         editor.setLineWrapMode(
             QPlainTextEdit.WidgetWidth if width is not None else QPlainTextEdit.NoWrap)
         editor.setPlainText(text)
+        bar = _StyleBar(self._container, size, color)
         self._editor = {"page": page, "widget": editor, "annot": annot, "anchor": anchor,
-                        "size": size, "color": color, "boxed": boxed, "width": width}
+                        "size": size, "color": color, "boxed": boxed, "width": width,
+                        "bar": bar}
+        self._style_editor()
         editor.textChanged.connect(self._fit_editor)
         editor.finished.connect(self.commit_text_edit)
+        bar.chosen.connect(self._restyle_text)
         self._fit_editor()
+        bar.show()
         editor.show()
         editor.setFocus()
         editor.moveCursor(QTextCursor.End)
         self.editing_changed.emit(True)
 
+    def _style_editor(self) -> None:
+        """Font and colour of the open editor, from its size and colour."""
+        ed = self._editor
+        scale = ed["page"].widget_transform().scale
+        font = QFont("Arial")  # Helvetica's metric twin: wraps where the PDF will
+        font.setPixelSize(max(1, round(ed["size"] * scale)))
+        ed["widget"].setFont(font)
+        ed["widget"].document().setDocumentMargin(PADDING * scale)
+        r, g, b = (round(c * 255) for c in ed["color"])
+        ed["widget"].setStyleSheet(
+            f"QPlainTextEdit {{ color: rgb({r},{g},{b}); background: rgba(255,255,255,215);"
+            f" border: 1px dashed rgb(40,110,230); }}")
+
+    def _restyle_text(self, size, color) -> None:
+        """A pick on the style bar: restyle what's being typed, and make it
+        the default for the next text."""
+        ed = self._editor
+        if ed is None:
+            return
+        if size is not None:
+            ed["size"] = self.text_size = size
+        if color is not None:
+            ed["color"] = self.text_color = color
+        self._style_editor()
+        self._fit_editor()
+        self.text_style_changed.emit()
+
     def _fit_editor(self) -> None:
         ed = self._editor
         if ed is None:
             return
-        scale = ed["page"].widget_transform().scale
+        page = ed["page"]
+        scale = page.widget_transform().scale
         lay = layout(ed["widget"].toPlainText(), ed["size"], ed["width"])
         # A little extra room: Qt's line spacing differs slightly from ours,
         # and the committed box is sized by layout(), not by this widget.
         ed["widget"].setGeometry(ed["anchor"].x(), ed["anchor"].y(),
                                  math.ceil(lay.width * scale) + 4,
                                  math.ceil(lay.height * scale * 1.05) + 4)
+        # The style bar sits just above the text, or below it at a page's
+        # top edge; the text grows downward, so re-place it every time.
+        bar = ed["bar"]
+        box = ed["widget"].geometry().translated(page.pos())
+        y = box.top() - bar.height() - 4
+        if y < page.y() + 4:
+            y = box.bottom() + 5
+        bar.move(*self._clamped(bar, box.left(), y))
+        bar.raise_()
 
     def commit_text_edit(self) -> None:
         """Close the text editor, turning what was typed into an edit."""
@@ -1437,6 +1525,8 @@ class PdfView(QScrollArea):
         self._editor = None
         widget.hide()
         widget.deleteLater()
+        ed["bar"].hide()
+        ed["bar"].deleteLater()
         self.setFocus(Qt.OtherFocusReason)
         self.editing_changed.emit(False)
         # However typing ended -- click away, Esc, Ctrl+Enter -- it ends the
@@ -1465,8 +1555,11 @@ class PdfView(QScrollArea):
                 self.select_annot(index, new.ident)
         elif not text.strip():
             self.annots_edit.emit(key, without(annots, old), "Delete Text")
-        elif text != old.contents:
-            changed = replace(old, contents=text, rect=rect, edited=True, reshaped=True)
+        elif (text, ed["size"], tuple(ed["color"])) != \
+                (old.contents, old.font_size, tuple(old.color)):
+            # A new colour or size alone is an edit too (the style bar).
+            changed = replace(old, contents=text, rect=rect, font_size=ed["size"],
+                              color=ed["color"], edited=True, reshaped=True)
             self.annots_edit.emit(key, tuple(changed if a.ident == old.ident else a
                                              for a in annots), "Edit Text")
 
@@ -1509,12 +1602,6 @@ class PdfView(QScrollArea):
             painter.fillRect(box, QColor(40, 110, 230, 30))
             painter.setPen(QPen(QColor(40, 110, 230), 1.5, Qt.DashLine))
             painter.drawRect(box)
-        if drag is not None and drag["mode"] == "place" and drag["page"] is page \
-                and drag["end"] is not None:
-            a, b = drag["press"], drag["end"]
-            painter.setPen(QPen(QColor(40, 110, 230), 1, Qt.DashLine))
-            painter.drawRect(QRect(QPoint(min(a.x(), b.x()), a.y()),
-                                   QPoint(max(a.x(), b.x()), a.y() + 24)))
         if self._text_sel is not None and self._text_sel[0] == page.index:
             _, start, end = self._text_sel
             for rect in self.document.text_rects(page.index, start, end):

@@ -169,9 +169,12 @@ back older marks of the same kind on the same text (`lay_markup`) -- split,
 or removed with the comment carried over -- so highlights never stack and
 darken. Existing file markups get reshaped (new /QuadPoints + regenerated AP).
 
-Annotations stage 3: Typewriter T (no border, breaks only at Enter) and
-Text Box X (bordered, wraps; click = 200pt wide, drag = chosen width),
-typed in place in a QPlainTextEdit over the page; size/colour presets; the
+Annotations stage 3: Typewriter T (no border, breaks only at Enter),
+typed in place in a QPlainTextEdit over the page; size/colour presets
+(Text Style menu, and the style bar above the editor while typing --
+restyling existing text is an edit even if no word changed); the
+separate Text Box X tool was removed (user's call), but bordered boxes
+already in files still edit and resize; the
 typewriter clicks into existing text to edit it; double-click edits any
 FreeText (other apps' too, restyled in Helvetica keeping size/colour).
 Helvetica/WinAnsi only: non-cp1252 text is refused, never saved as '?'.
@@ -223,9 +226,11 @@ Radio-button creation is not built (filling radios is). Clicking empty page
 in Edit Fields returns to Select (user's rule, as everywhere).
 
 Mark bar (user's design): in the Select tool, a text drag or double-clicked
-word shows a small Highlight / Underline / Strikethrough bar under the
-selection (a child widget of the page, not a popup -- no focus grab, scrolls
-with the page). A click elsewhere, Esc, zoom or a tool change dismisses it.
+word shows a small Highlight (current colour, or a swatch that becomes the
+current colour) / Underline / Strikethrough bar under the selection (a child
+of the page column, not a popup -- no focus grab, scrolls with the page, not
+clipped by a narrow page). A click elsewhere, Esc, zoom or a tool change
+dismisses it. The typewriter's style bar is the same kind of widget.
 The Highlight/Underline/Strikethrough tools still mark directly, no bar.
 
 Rotate View (left/right, Ctrl+L/R) was removed (user's call): a turned view

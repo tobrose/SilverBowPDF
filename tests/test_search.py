@@ -222,12 +222,20 @@ def _bar_button(view, label):
 
 def test_mark_bar_under_a_text_selection():
     with _window() as w:
+        # Wide: the offscreen platform has no fonts, and its stand-in glyph
+        # boxes make the bar far wider than it is on Windows.
+        w.resize(1600, 800)
+        _settle()
         view = w.view
         page = _select_by_drag(view, "beta gamma")
         assert view.selected_text() == "beta gamma", view.selected_text()
         bar = view._mark_bar
         assert bar is not None and bar.isVisible(), "bar appears after a text drag"
-        assert bar.parent() is page and page.rect().contains(bar.geometry()), "inside the page"
+        area = view._container
+        assert bar.parent() is area and area.rect().contains(bar.geometry()), "inside the column"
+        sel = view._widget_rect(page, view.document.find_text(0, "beta gamma")[0][2][0])
+        sel.translate(QPointF(page.pos()))
+        assert 0 < bar.geometry().top() - sel.bottom() < 12, "just under the selection"
 
         _bar_button(view, "Underline").click()
         _app.processEvents()
@@ -255,6 +263,77 @@ def test_mark_bar_under_a_text_selection():
         _select_by_drag(view, "Alpha")
         assert view._mark_bar is None, "the Highlight tool marks directly, no bar"
         assert view.document.page_annots(0)[-1].kind == "Highlight"
+
+
+def _bar_button_tip(bar, tip):
+    from PySide6.QtWidgets import QToolButton
+    return next(b for b in bar.findChildren(QToolButton) if b.toolTip() == tip)
+
+
+def test_mark_bar_colour_swatches():
+    from pdfapp.annots import HIGHLIGHT_COLORS
+    with _window() as w:
+        view = w.view
+        _select_by_drag(view, "beta gamma")
+        _bar_button_tip(view._mark_bar, "Highlight green").click()
+        _app.processEvents()
+        (mark,) = view.document.page_annots(0)
+        assert mark.kind == "Highlight" and mark.color == HIGHLIGHT_COLORS["Green"], mark.color
+        assert view.highlight_color == HIGHLIGHT_COLORS["Green"], "the pick becomes current"
+
+        _select_by_drag(view, "Fox")
+        _bar_button(view, "Highlight").click()  # current colour, now green
+        assert view.document.page_annots(0)[-1].color == HIGHLIGHT_COLORS["Green"]
+
+
+def test_typewriter_style_bar():
+    from pdfapp.annots import TEXT_COLORS
+    with _window() as w:
+        view = w.view
+        page = view._pages[0]
+        view.set_tool(Tool.TYPEWRITER)
+        spot = QPoint(150, 300)
+        _drag(view, page, Qt.LeftButton, spot, spot)
+        ed = view._editor
+        assert ed is not None and ed["bar"].isVisible(), "style bar shows while typing"
+        bar = ed["bar"]
+        assert bar.geometry().bottom() < ed["widget"].geometry().translated(page.pos()).top(), \
+            "above the text"
+        ed["widget"].insertPlainText("Hello there")
+
+        _bar_button_tip(bar, "Red").click()
+        _bar_button_tip(bar, "18 pt").click()
+        assert view._editor is ed, "picking a style doesn't end typing"
+        assert ed["color"] == TEXT_COLORS["Red"] and ed["size"] == 18
+        assert "rgb(204,26,26)" in ed["widget"].styleSheet(), "the editor shows the colour"
+        assert w.act_tool_typewriter.icon().pixmap(14, 14).toImage().pixelColor(7, 7).red() > 150
+        assert [a.text() for a in w.text_size_actions.actions() if a.isChecked()] == ["18 pt"]
+
+        view.commit_text_edit()
+        _app.processEvents()
+        (typed,) = view.document.page_annots(0)
+        assert typed.kind == "FreeText" and typed.contents == "Hello there"
+        assert typed.color == TEXT_COLORS["Red"] and typed.font_size == 18
+        assert not bar.isVisible() and view._editor is None
+        assert (view.text_color, view.text_size) == (TEXT_COLORS["Red"], 18), "sticky default"
+
+        # Restyling existing text without changing a word is still an edit.
+        view._edit_text(page, typed)
+        _bar_button_tip(view._editor["bar"], "Blue").click()
+        view.commit_text_edit()
+        _app.processEvents()
+        (again,) = view.document.page_annots(0)
+        assert again.color == TEXT_COLORS["Blue"] and again.contents == "Hello there"
+        assert w.history.undo_label() == "Edit Text"
+
+
+def test_text_box_tool_is_gone():
+    from PySide6.QtGui import QAction
+    with _window() as w:
+        texts = [a.text() for a in w.findChildren(QAction)]
+        assert "Text Box" not in texts and "Typewriter" in texts
+        assert "Text Field" in texts and "Multi-line Text Field" in texts, "form tools stay"
+        assert not hasattr(Tool, "TEXTBOX")
 
 
 def test_rotate_view_is_gone():

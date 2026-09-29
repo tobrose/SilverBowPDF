@@ -210,9 +210,7 @@ class MainWindow(QMainWindow):
         self.act_tool_typewriter = QAction("Typewriter", self, shortcut=QKeySequence("T"),
                                            checkable=True,
                                            triggered=lambda: self.view.set_tool(Tool.TYPEWRITER))
-        self.act_tool_textbox = QAction("Text Box", self, shortcut=QKeySequence("X"),
-                                        checkable=True,
-                                        triggered=lambda: self.view.set_tool(Tool.TEXTBOX))
+        # No Text Box tool (removed, user's call): the typewriter covers it.
         def tool(text, key, which):
             act = QAction(text, self, checkable=True,
                           triggered=lambda: self.view.set_tool(which))
@@ -236,7 +234,7 @@ class MainWindow(QMainWindow):
             Tool.NOTE: self.act_tool_note,
             Tool.HIGHLIGHT: self.act_tool_highlight, Tool.UNDERLINE: self.act_tool_underline,
             Tool.STRIKEOUT: self.act_tool_strikeout, Tool.TYPEWRITER: self.act_tool_typewriter,
-            Tool.TEXTBOX: self.act_tool_textbox, Tool.RECT: self.act_tool_rect,
+            Tool.RECT: self.act_tool_rect,
             Tool.ELLIPSE: self.act_tool_ellipse, Tool.LINE: self.act_tool_line,
             Tool.ARROW: self.act_tool_arrow, Tool.PEN: self.act_tool_pen,
             Tool.STAMP: self.act_tool_stamp, Tool.FORM: self.act_tool_form,
@@ -250,15 +248,14 @@ class MainWindow(QMainWindow):
         for act in (self.act_tool_highlight, self.act_tool_underline, self.act_tool_strikeout):
             self.annotate_menu.addAction(act)
         self.annotate_menu.addSeparator()
-        for act in (self.act_tool_typewriter, self.act_tool_textbox):
-            self.annotate_menu.addAction(act)
+        self.annotate_menu.addAction(self.act_tool_typewriter)
         self.annotate_menu.addSeparator()
         for act in (self.act_tool_rect, self.act_tool_ellipse, self.act_tool_line,
                     self.act_tool_arrow, self.act_tool_pen):
             self.annotate_menu.addAction(act)
         self.annotate_menu.addSeparator()
         self.annotate_tools = {Tool.NOTE, Tool.HIGHLIGHT, Tool.UNDERLINE, Tool.STRIKEOUT,
-                               Tool.TYPEWRITER, Tool.TEXTBOX, Tool.RECT, Tool.ELLIPSE,
+                               Tool.TYPEWRITER, Tool.RECT, Tool.ELLIPSE,
                                Tool.LINE, Tool.ARROW, Tool.PEN, Tool.STAMP}
         self.form_tools = {Tool.FORM, Tool.FIELD_TEXT, Tool.FIELD_MULTILINE,
                            Tool.FIELD_CHECKBOX, Tool.FIELD_COMBO}
@@ -401,6 +398,9 @@ class MainWindow(QMainWindow):
         self.view.editing_changed.connect(self._on_editing_changed)
         self.view.message.connect(lambda text: self.statusBar().showMessage(text, 8000))
         self.view.text_selection_changed.connect(self.act_copy.setEnabled)
+        self.view.text_style_changed.connect(self._show_text_style)
+        self.view.highlight_color_changed.connect(
+            lambda c: self.act_tool_highlight.setIcon(self._swatch(c)))
 
     def _build_menus(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
@@ -704,7 +704,7 @@ class MainWindow(QMainWindow):
         if enabled:
             self.statusBar().showMessage(
                 "Letter shortcuts on: V Select, N Note, H Highlight, U Underline, "
-                "S Strikethrough, T Typewriter, X Text Box, R E L A P shapes and pen", 10000)
+                "S Strikethrough, T Typewriter, R E L A P shapes and pen", 10000)
 
     def _on_tool_changed(self, tool: Tool) -> None:
         act = self.tool_actions[tool]
@@ -725,9 +725,16 @@ class MainWindow(QMainWindow):
             self.view.text_size = float(size)
         if color is not None:
             self.view.text_color = color
-            self.act_tool_typewriter.setIcon(self._swatch(color))
-        if self.view.tool not in (Tool.TYPEWRITER, Tool.TEXTBOX):
+        self._show_text_style()
+        if self.view.tool is not Tool.TYPEWRITER:
             self.view.set_tool(Tool.TYPEWRITER)
+
+    def _show_text_style(self) -> None:
+        """Menus follow the current text style, however it was picked (menu
+        or the style bar over the typewriter)."""
+        self.act_tool_typewriter.setIcon(self._swatch(self.view.text_color))
+        for act in self.text_size_actions.actions():
+            act.setChecked(act.text() == f"{self.view.text_size:g} pt")
 
     def _set_shape_style(self, color=None, width=None) -> None:
         if color is not None:

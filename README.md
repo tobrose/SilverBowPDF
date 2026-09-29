@@ -42,9 +42,9 @@ on a headless box.
 | Tools > Single-Letter Tool Shortcuts | Turn on the letter keys below (off by default) |
 | `V` / `N` / `Esc` | Select tool / Note tool / back to Select |
 | `H` / `U` / `S` | Highlight / Underline / Strikethrough tools -- drag across text |
-| Drag on text, double-click a word | Select text; a bar below it offers Highlight / Underline / Strikethrough. `Ctrl+C` copies, `Ctrl+A` selects the page |
+| Drag on text, double-click a word | Select text; a bar below it offers Highlight (current colour or a swatch) / Underline / Strikethrough. `Ctrl+C` copies, `Ctrl+A` selects the page |
 | Right-click selected text | Copy, highlight, underline or strike it through |
-| `T` / `X` | Typewriter / Text Box: click (or drag a width) and type; `Esc` or click away to finish (back to Select) |
+| `T` | Typewriter: click and type; the bar above picks colour and size. `Esc` or click away to finish (back to Select) |
 | Double-click a text box | Edit its text in place |
 | Drag a text box's edge or corner | Resize it; the text re-wraps |
 | `R` / `E` / `L` / `A` / `P` | Rectangle / Ellipse / Line / Arrow / Pen -- drag to draw; `Shift` squares or snaps to 45 degrees |
