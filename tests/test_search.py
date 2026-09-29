@@ -1,4 +1,5 @@
-"""Find (Ctrl+F) and the Pan tool.
+"""Viewer UI: find (Ctrl+F), the Pan tool, the mark bar under a text
+selection, and the absence of view rotation.
 
 Search is pdfium's, over displayed pages; the find bar scans in slices from
 the current page and steps through matches in reading order, wrapping.
@@ -201,6 +202,70 @@ def test_pan_tool_and_middle_drag_scroll():
         _drag(view, page, Qt.MiddleButton, QPoint(300, 300), QPoint(330, 350))
         assert (hbar.value(), vbar.value()) == (210, 330), "middle drag pans in any tool"
         assert view.tool is Tool.SELECT
+
+
+def _select_by_drag(view, needle):
+    """Drag across `needle` on page 1 like a user would; return the page."""
+    page = view._pages[0]
+    rect = view.document.find_text(0, needle)[0][2][0]
+    left, top, right, bottom = page.widget_transform().pdf_rect_to_widget(rect)
+    mid = int((top + bottom) / 2)
+    _drag(view, page, Qt.LeftButton, QPoint(int(left) + 1, mid), QPoint(int(right) - 1, mid))
+    _app.processEvents()
+    return page
+
+
+def _bar_button(view, label):
+    from PySide6.QtWidgets import QToolButton
+    return next(b for b in view._mark_bar.findChildren(QToolButton) if b.text() == label)
+
+
+def test_mark_bar_under_a_text_selection():
+    with _window() as w:
+        view = w.view
+        page = _select_by_drag(view, "beta gamma")
+        assert view.selected_text() == "beta gamma", view.selected_text()
+        bar = view._mark_bar
+        assert bar is not None and bar.isVisible(), "bar appears after a text drag"
+        assert bar.parent() is page and page.rect().contains(bar.geometry()), "inside the page"
+
+        _bar_button(view, "Underline").click()
+        _app.processEvents()
+        kinds = [a.kind for a in view.document.page_annots(0)]
+        assert kinds == ["Underline"], kinds
+        assert view._mark_bar is None and view.text_selection() is None
+        assert w.history.can_undo(), "one undoable edit"
+
+        _select_by_drag(view, "Fox")
+        _bar_button(view, "Highlight").click()
+        assert view._mark_bar is None
+        assert [a.kind for a in view.document.page_annots(0)] == ["Underline", "Highlight"]
+
+        _select_by_drag(view, "here")
+        assert view._mark_bar is not None
+        blank = QPoint(page.width() // 2, page.height() - 20)  # a click on empty page
+        _drag(view, page, Qt.LeftButton, blank, blank)
+        assert view._mark_bar is None and view.text_selection() is None, "click away dismisses"
+
+        _select_by_drag(view, "here")
+        view.set_scale(view.scale * 1.5)
+        assert view._mark_bar is None, "zooming dismisses (its position is stale)"
+
+        view.set_tool(Tool.HIGHLIGHT)
+        _select_by_drag(view, "Alpha")
+        assert view._mark_bar is None, "the Highlight tool marks directly, no bar"
+        assert view.document.page_annots(0)[-1].kind == "Highlight"
+
+
+def test_rotate_view_is_gone():
+    from PySide6.QtGui import QAction
+    with _window() as w:
+        texts = [a.text().replace("&", "") for a in w.findChildren(QAction)]
+        assert not any("Rotate View" in t for t in texts), texts
+        keys = {a.shortcut().toString() for a in w.findChildren(QAction)}
+        assert not keys & {"Ctrl+L", "Ctrl+R"}, "view-rotation shortcuts removed"
+        assert "Rotate Pages Right" in texts, "page rotation stays"
+        assert not hasattr(w.view, "rotate_view") and w.view.rotation == 0
 
 
 if __name__ == "__main__":

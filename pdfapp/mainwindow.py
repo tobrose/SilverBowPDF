@@ -162,13 +162,8 @@ class MainWindow(QMainWindow):
         self.act_fit_page = QAction("Fit &Page", self, shortcut=QKeySequence("Ctrl+2"),
                                     triggered=self.view.fit_page)
 
-        # View rotation is display-only and never saved; page rotation below is
-        # an edit. Both exist, so the labels have to say which is which.
-        self.act_rotate_ccw = QAction("Rotate View &Left", self, shortcut=QKeySequence("Ctrl+L"),
-                                      triggered=lambda: self.view.rotate_view(-90))
-        self.act_rotate_cw = QAction("Rotate View &Right", self, shortcut=QKeySequence("Ctrl+R"),
-                                     triggered=lambda: self.view.rotate_view(90))
-
+        # No "rotate view": it was removed (user's call) because a turned view
+        # on top of turned pages confused people. Rotation is a page edit only.
         # These act on the pages selected in the sidebar -- see _targets().
         sel = lambda: self._targets()  # noqa: E731
         self.act_page_rot_ccw = QAction("Rotate Pages Left", self,
@@ -386,10 +381,6 @@ class MainWindow(QMainWindow):
         bar.addWidget(self.zoom_box)
         bar.addAction(self.act_zoom_in)
 
-        bar.addSeparator()
-        bar.addAction(self.act_rotate_ccw)
-        bar.addAction(self.act_rotate_cw)
-
         tools = QToolBar("Tools", self)
         tools.setMovable(False)
         self.addToolBar(tools)
@@ -449,9 +440,6 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.act_fit_width)
         view_menu.addAction(self.act_fit_page)
         view_menu.addSeparator()
-        view_menu.addAction(self.act_rotate_ccw)
-        view_menu.addAction(self.act_rotate_cw)
-        view_menu.addSeparator()
         toggle = self.sidebar_dock.toggleViewAction()
         toggle.setText("Page &Thumbnails")
         toggle.setShortcut(QKeySequence("F4"))
@@ -482,7 +470,7 @@ class MainWindow(QMainWindow):
     def _set_document_actions_enabled(self, enabled: bool) -> None:
         for act in (self.act_close, self.act_save_as, self.act_zoom_in, self.act_zoom_out,
                     self.act_zoom_100, self.act_fit_width, self.act_fit_page,
-                    self.act_rotate_ccw, self.act_rotate_cw, self.act_page_rot_ccw,
+                    self.act_page_rot_ccw,
                     self.act_page_rot_cw, self.act_page_up, self.act_page_down,
                     self.act_page_delete, self.act_page_extract, self.act_page_insert,
                     *self.tool_actions.values(), self.act_delete_annot, self.act_select_all,

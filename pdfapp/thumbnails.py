@@ -4,8 +4,7 @@ The sidebar never edits anything itself. Drops and key presses are reported
 as signals; MainWindow turns them into PageList edits and calls set_document
 again. One source of truth, so the sidebar can't disagree with the document.
 
-Thumbnails show the page as it will be saved -- intrinsic plus edit rotation,
-but not the view rotation, which is a display preference of the main view.
+Thumbnails show the page as it will be saved: intrinsic plus edit rotation.
 """
 
 from __future__ import annotations

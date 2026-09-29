@@ -29,7 +29,6 @@ on a headless box.
 | `Ctrl+O` / `Ctrl+W` | Open / close |
 | `Ctrl++` `Ctrl+-` `Ctrl+0` | Zoom in / out / 100% |
 | `Ctrl+1` `Ctrl+2` | Fit width / fit page |
-| `Ctrl+L` `Ctrl+R` | Rotate view left / right (display only) |
 | `F4` | Show / hide page thumbnails |
 | `Ctrl+Shift+L` `Ctrl+Shift+R` | Rotate selected pages left / right (saved) |
 | `Alt+Up` `Alt+Down` | Move selected pages earlier / later |
@@ -43,7 +42,7 @@ on a headless box.
 | Tools > Single-Letter Tool Shortcuts | Turn on the letter keys below (off by default) |
 | `V` / `N` / `Esc` | Select tool / Note tool / back to Select |
 | `H` / `U` / `S` | Highlight / Underline / Strikethrough tools -- drag across text |
-| Drag on text, double-click a word | Select text; `Ctrl+C` copies, `Ctrl+A` selects the page |
+| Drag on text, double-click a word | Select text; a bar below it offers Highlight / Underline / Strikethrough. `Ctrl+C` copies, `Ctrl+A` selects the page |
 | Right-click selected text | Copy, highlight, underline or strike it through |
 | `T` / `X` | Typewriter / Text Box: click (or drag a width) and type; `Esc` or click away to finish (back to Select) |
 | Double-click a text box | Edit its text in place |
@@ -71,7 +70,8 @@ pdfapp/
   document.py    pypdfium2 wrapper. No Qt imports, testable headless.
   writer.py      Saves edits with pikepdf: temp file, verify, atomic replace.
   rendering.py   pdfium bitmap -> QImage, plus an LRU page cache.
-  pageview.py    Continuous scrolling view, zoom, view rotation.
+  pageview.py    Continuous scrolling view, zoom, tools, text selection.
+  findbar.py     Ctrl+F find bar.
   thumbnails.py  Page sidebar: select, drag to reorder, lazy thumbnails.
   mainwindow.py  Menus, toolbar, status bar, drag-and-drop.
 tests/
@@ -90,7 +90,7 @@ putting a highlight two inches from where the user clicked.
 ## Status
 
 Working: open (including encrypted, with a password prompt), continuous scroll,
-zoom to cursor, fit width/page, view rotation, page navigation, form-field
+zoom to cursor, fit width/page, find (Ctrl+F), pan, page navigation, form-field
 rendering, drag-and-drop, per-page error isolation, page operations
 (rotate/delete/reorder) with undo and save, thumbnail sidebar with
 multi-select and drag to reorder, extract pages to a new PDF, insert pages

@@ -42,8 +42,10 @@ pdfapp/
                  prune_dangling() drops bookmarks/links/fields/dests aimed at removed pages.
                  Foreign pages: plain append + _merge_forms, NOT add_pages_from (see rule 6).
   rendering.py   pdfium bitmap -> QImage, plus an LRU page cache.
-  pageview.py    Continuous scroll view, zoom, view rotation, tools, annotation
+  pageview.py    Continuous scroll view, zoom, tools, annotation
                  select/move/delete. Emits edit requests; never edits.
+                 No view rotation in the UI (removed, user's call); the
+                 view_rotation plumbing under it stays, always 0.
   findbar.py     Ctrl+F bar. Scans pages in 30ms timer slices from the current
                  page (find_text: pdfium search, throwaway text pages so a long
                  document isn't pinned in memory); the view paints the matches.
@@ -144,7 +146,7 @@ window. Follow that pattern: isolate, display, don't hide.
 ## Roadmap
 
 Built: open (incl. encrypted), continuous scroll, zoom to cursor, fit
-width/page, view rotation, navigation, form-field rendering, drag-and-drop,
+width/page, navigation, form-field rendering, drag-and-drop,
 per-page error isolation. Page operations (rotate, delete, reorder) on
 the sidebar selection, with undo/redo, Save / Save As, and an unsaved-changes
 prompt. Thumbnail sidebar with multi-select and drag-to-reorder. Extract
@@ -174,7 +176,7 @@ typewriter clicks into existing text to edit it; double-click edits any
 FreeText (other apps' too, restyled in Helvetica keeping size/colour).
 Helvetica/WinAnsi only: non-cp1252 text is refused, never saved as '?'.
 Text reads upright on rotated pages (AP /Matrix counter-rotates by the page
-rotation at typing time); typing is blocked while the *view* is rotated.
+rotation at typing time).
 Single-key tool shortcuts are disabled while the editor is open. Finishing
 (click away, Esc, Ctrl+Enter) also returns to the Select tool, and the
 click-away does nothing else (user's request: no accidental new boxes).
@@ -219,6 +221,16 @@ the deleted fields from /AcroForm). A flat PDF gains an /AcroForm with Helv
 and ZaDb. New fields are fillable before saving (current_widgets).
 Radio-button creation is not built (filling radios is). Clicking empty page
 in Edit Fields returns to Select (user's rule, as everywhere).
+
+Mark bar (user's design): in the Select tool, a text drag or double-clicked
+word shows a small Highlight / Underline / Strikethrough bar under the
+selection (a child widget of the page, not a popup -- no focus grab, scrolls
+with the page). A click elsewhere, Esc, zoom or a tool change dismisses it.
+The Highlight/Underline/Strikethrough tools still mark directly, no bar.
+
+Rotate View (left/right, Ctrl+L/R) was removed (user's call): a turned view
+on top of turned pages confused users. Page rotation (sidebar, Pages menu)
+is the only rotation.
 
 Find (Ctrl+F; F3 / Shift+F3, Enter / Shift+Enter): bar above the view,
 match case / whole words, "3 of 17", all matches tinted, current one

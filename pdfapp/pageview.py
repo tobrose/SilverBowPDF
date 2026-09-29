@@ -17,15 +17,18 @@ from enum import Enum
 from typing import List, Optional
 
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QTextCursor, QWheelEvent
+from PySide6.QtGui import (QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap,
+                           QTextCursor, QWheelEvent)
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
+    QHBoxLayout,
     QLabel,
     QMenu,
     QPlainTextEdit,
     QScrollArea,
     QSizePolicy,
+    QToolButton,
     QToolTip,
     QVBoxLayout,
     QWidget,
@@ -205,6 +208,43 @@ class _TextEditor(QPlainTextEdit):
         self.setFocus()
 
 
+class _MarkBar(QFrame):
+    """Highlight / Underline / Strikethrough buttons under fresh text
+    selection (Select tool). A child of the page, not a popup window: it
+    scrolls with the page, can't grab the next click, and costs a remote desktop one
+    small repaint. Buttons take no focus, so keys still reach the view."""
+
+    chosen = Signal(str)  # "Highlight" | "Underline" | "StrikeOut"
+
+    def __init__(self, parent, highlight_color):
+        super().__init__(parent)
+        self.setObjectName("markbar")
+        # Explicit colours throughout: the viewport's dark stylesheet
+        # cascades to every child otherwise.
+        self.setStyleSheet(
+            "#markbar { background: #ffffff; border: 1px solid #9a9aa2; border-radius: 4px; }"
+            "QToolButton { background: transparent; color: #1e1e1e; border: none;"
+            " border-radius: 3px; padding: 3px 8px; }"
+            "QToolButton:hover { background: #e3ecfb; }"
+            "QToolButton:pressed { background: #c9dbf7; }")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(3, 2, 3, 2)
+        layout.setSpacing(2)
+        swatch = QPixmap(12, 12)
+        swatch.fill(QColor.fromRgbF(*highlight_color))
+        for kind, label, icon in (("Highlight", "Highlight", QIcon(swatch)),
+                                  ("Underline", "Underline", None),
+                                  ("StrikeOut", "Strikethrough", None)):
+            button = QToolButton(self, text=label, autoRaise=True, focusPolicy=Qt.NoFocus)
+            if icon is not None:
+                button.setIcon(icon)
+                button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+            button.setCursor(Qt.PointingHandCursor)
+            button.clicked.connect(lambda _=False, k=kind: self.chosen.emit(k))
+            layout.addWidget(button)
+        self.adjustSize()
+
+
 class PageWidget(QWidget):
     """A single rendered page."""
 
@@ -329,6 +369,10 @@ class PdfView(QScrollArea):
         self.renderer: Optional[PageRenderer] = None
         self._pages: List[PageWidget] = []
         self._scale = 1.0
+        # View rotation. Always 0 since "rotate view" was removed (user's call:
+        # a turned view on top of turned pages confused people); the plumbing
+        # below it -- renderer, PageTransform -- still takes one and is tested
+        # against pdfium with it, so it stays rather than being ripped out.
         self._rotation = 0
         self._fit = FitMode.WIDTH
         self._current_page = 0
@@ -339,6 +383,7 @@ class PdfView(QScrollArea):
         self._search_hits = {}  # page index -> [(start, end, rects)], see set_search_hits
         self._search_current = None  # (page index, start) of the current match
         self._pan = None        # (last global pos, mouse button) while panning
+        self._mark_bar = None   # _MarkBar under a fresh text selection, see _show_mark_bar
         self.highlight_color = HIGHLIGHT_COLORS["Yellow"]
         self.text_size = 12.0
         self.text_color = TEXT_COLORS["Black"]
@@ -382,6 +427,7 @@ class PdfView(QScrollArea):
             return
         self._tool = tool
         self._drag = None
+        self._hide_mark_bar()  # it's a Select-tool thing
         if tool not in FORM_TOOLS:
             self._selected_field = None
         for page in self._pages:
@@ -416,11 +462,13 @@ class PdfView(QScrollArea):
         old = self._text_sel
         self._text_sel = (index, start, end)
         if old != self._text_sel:
+            self._hide_mark_bar()  # it belonged to the old selection
             self._update_pages({index} | ({old[0]} if old else set()))
             if old is None:
                 self.text_selection_changed.emit(True)
 
     def clear_text_selection(self) -> None:
+        self._hide_mark_bar()
         if self._text_sel is not None:
             index = self._text_sel[0]
             self._text_sel = None
@@ -458,6 +506,44 @@ class PdfView(QScrollArea):
         for i in indices:
             if 0 <= i < len(self._pages):
                 self._pages[i].update()
+
+    # -- the Highlight / Underline / Strikethrough bar under a selection
+
+    def _show_mark_bar(self) -> None:
+        """Offer to mark the text just selected with the mouse (Select
+        tool). Sits under the selection's last line, or above its first
+        when there's no room below; always inside the page."""
+        self._hide_mark_bar()
+        if self._tool is not Tool.SELECT or self._text_sel is None:
+            return
+        index, start, end = self._text_sel
+        rects = [self._widget_rect(self._pages[index], r)
+                 for r in self.document.text_rects(index, start, end)]
+        if not rects:
+            return
+        page = self._pages[index]
+        bar = _MarkBar(page, self.highlight_color)
+        bar.chosen.connect(self._mark_from_bar)
+        gap = 6
+        x = rects[-1].center().x() - bar.width() / 2
+        y = max(r.bottom() for r in rects) + gap
+        if y + bar.height() > page.height() - 4:
+            y = min(r.top() for r in rects) - gap - bar.height()
+        x = max(4, min(x, page.width() - bar.width() - 4))
+        y = max(4, min(y, page.height() - bar.height() - 4))
+        bar.move(int(x), int(y))
+        bar.show()
+        self._mark_bar = bar
+
+    def _hide_mark_bar(self) -> None:
+        if self._mark_bar is not None:
+            self._mark_bar.hide()
+            self._mark_bar.deleteLater()
+            self._mark_bar = None
+
+    def _mark_from_bar(self, kind: str) -> None:
+        self.mark_selection(kind)  # clears the selection, and with it the bar
+        self.setFocus(Qt.OtherFocusReason)
 
     # -- search matches (found by findbar.FindBar; drawn here as chrome).
     # Repaint only the pages whose matches changed: on a remote desktop every repaint
@@ -593,6 +679,7 @@ class PdfView(QScrollArea):
             super().mouseReleaseEvent(event)
 
     def page_mouse_press(self, page: "PageWidget", event) -> bool:
+        self._hide_mark_bar()  # clicking anywhere else on a page dismisses it
         if self._pan_press(event):
             return True
         if event.button() != Qt.LeftButton or self.document is None:
@@ -807,6 +894,8 @@ class PdfView(QScrollArea):
             self.clear_text_selection()  # a click, not a drag
         elif self._tool in MARKUP_TOOLS:
             self.mark_selection(MARKUP_TOOLS[self._tool])
+        else:
+            self._show_mark_bar()
         page.update()
         return True
 
@@ -830,6 +919,7 @@ class PdfView(QScrollArea):
         char = self._char_near(page, pos, exact=True)
         if char >= 0:
             self.set_text_selection(page.index, *self.document.word_at(page.index, char))
+            self._show_mark_bar()
             return True
         return False
 
@@ -1296,11 +1386,6 @@ class PdfView(QScrollArea):
 
     def _open_editor(self, page, anchor: QPoint, annot, text, size, color, boxed, width) -> None:
         self.commit_text_edit()
-        if self._rotation != 0:
-            # Qt can't draw the editor sideways, and text typed while the view
-            # is turned would come out sideways once it's turned back.
-            self.message.emit("Rotate the view back to normal (Ctrl+L / Ctrl+R) to type text.")
-            return
         scale = page.widget_transform().scale
         editor = _TextEditor(page)
         font = QFont("Arial")  # Helvetica's metric twin: wraps where the PDF will
@@ -1524,6 +1609,7 @@ class PdfView(QScrollArea):
         return None
 
     def _rebuild(self) -> None:
+        self._hide_mark_bar()  # before its page is deleted under it
         while self._layout.count():
             item = self._layout.takeAt(0)
             widget = item.widget()
@@ -1572,6 +1658,7 @@ class PdfView(QScrollArea):
             return
         self.commit_text_edit()  # the editor is sized for the old zoom
         self.commit_field_edit()
+        self._hide_mark_bar()    # so is the mark bar's position
 
         hbar, vbar = self.horizontalScrollBar(), self.verticalScrollBar()
         if anchor is None:
@@ -1653,23 +1740,6 @@ class PdfView(QScrollArea):
             event.accept()
             return
         super().wheelEvent(event)
-
-    # ---- rotation ------------------------------------------------------
-
-    def rotate_view(self, delta: int) -> None:
-        """Rotate the *view*. Does not modify the document."""
-        if self.document is None:
-            return
-        self.commit_text_edit()
-        self.commit_field_edit()
-        self._rotation = normalize_rotation(self._rotation + delta)
-        if self.renderer is not None:
-            self.renderer.clear()
-        for page in self._pages:
-            page.apply_view_state(self._scale, self._rotation)
-        self._apply_fit()
-        self._container.adjustSize()
-        self.scroll_to_page(self._current_page)
 
     # ---- navigation ----------------------------------------------------
 
