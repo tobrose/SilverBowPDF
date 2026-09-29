@@ -53,6 +53,7 @@ from .fields import (
     TEXT,
 )
 from .pageview import FitMode, PdfView, Tool
+from .settings import Settings
 from .thumbnails import ThumbnailSidebar
 from .writer import EncryptionWouldBeLost, SaveError, commit, write_pdf
 
@@ -72,12 +73,13 @@ ZOOM_PRESETS = [
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, settings: Optional[Settings] = None):
         super().__init__()
         self.setWindowTitle(APP_NAME)
         self.resize(1100, 860)
         self.setAcceptDrops(True)
 
+        self.settings = settings if settings is not None else Settings()
         self.history: Optional[History[DocState]] = None
         # Set while reopening the same file with edits intact (a failed save),
         # so document_opened doesn't wipe the undo history.
@@ -118,6 +120,7 @@ class MainWindow(QMainWindow):
         self.view.document_opened.connect(self._on_document_opened)
 
         self._set_document_actions_enabled(False)
+        self._apply_letter_shortcuts()
 
     # ---- construction --------------------------------------------------
 
@@ -303,6 +306,13 @@ class MainWindow(QMainWindow):
         for menu in (self.highlight_menu, self.text_menu, self.shape_menu):
             self.annotate_menu.addMenu(menu)
 
+        # Single-letter tool shortcuts: off unless turned on (Settings).
+        self.letter_actions = {act: act.shortcut() for act in self.tool_actions.values()
+                               if act.shortcut().count() == 1
+                               and len(act.shortcut().toString()) == 1}
+        self.act_letter_shortcuts = QAction("Single-Letter Tool Shortcuts", self, checkable=True,
+                                            triggered=self._toggle_letter_shortcuts)
+
         self.act_copy = QAction("&Copy", self, shortcut=QKeySequence.Copy, triggered=self.copy_text)
         self.act_copy.setEnabled(False)
         self.act_select_all = QAction("Select &All", self, shortcut=QKeySequence.SelectAll,
@@ -402,6 +412,8 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(self.act_tool_select)
         tools_menu.addMenu(self.annotate_menu)
         tools_menu.addMenu(self.form_menu)
+        tools_menu.addSeparator()
+        tools_menu.addAction(self.act_letter_shortcuts)
 
         view_menu = self.menuBar().addMenu("&View")
         view_menu.addAction(self.act_zoom_in)
@@ -656,6 +668,28 @@ class MainWindow(QMainWindow):
         widgets = tuple(changed if w.ident == widget.ident else w for w in doc.current_widgets(index))
         rename = (widget.name, changed.name) if changed.name != widget.name else None
         self._on_forms_edit(doc.page_key(index), widgets, f"Edit {changed.short_name()}", rename)
+
+    def _apply_letter_shortcuts(self) -> None:
+        """Give the tool actions their letter keys, or take them away --
+        which also hides the letters from the menus."""
+        choice = self.settings.letter_shortcuts()
+        for act, keys in self.letter_actions.items():
+            act.setShortcut(keys if choice.enabled else QKeySequence())
+        self.act_letter_shortcuts.setChecked(choice.enabled)
+        self.act_letter_shortcuts.setEnabled(not choice.locked)
+        self.act_letter_shortcuts.setText(
+            "Single-Letter Tool Shortcuts" + (" (set by administrator)" if choice.locked else ""))
+
+    def _toggle_letter_shortcuts(self, enabled: bool) -> None:
+        try:
+            self.settings.set_letter_shortcuts(enabled)
+        except PermissionError:
+            pass  # locked by policy; the action is disabled anyway
+        self._apply_letter_shortcuts()
+        if enabled:
+            self.statusBar().showMessage(
+                "Letter shortcuts on: V Select, N Note, H Highlight, U Underline, "
+                "S Strikethrough, T Typewriter, X Text Box, R E L A P shapes and pen", 10000)
 
     def _on_tool_changed(self, tool: Tool) -> None:
         act = self.tool_actions[tool]
