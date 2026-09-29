@@ -1,4 +1,4 @@
-# PyInstaller spec for ButterPDF.
+# PyInstaller spec for SilverbowPDF.
 #
 # Build:  pyinstaller packaging/pdfapp.spec --noconfirm
 #
@@ -107,7 +107,7 @@ exe = EXE(  # noqa: F821
     a.scripts,
     [],
     exclude_binaries=True,
-    name="ButterPDF",
+    name="SilverbowPDF",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -130,5 +130,5 @@ coll = COLLECT(  # noqa: F821
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="ButterPDF",
+    name="SilverbowPDF",
 )

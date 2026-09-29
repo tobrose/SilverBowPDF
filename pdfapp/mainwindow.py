@@ -57,7 +57,7 @@ from .settings import Settings
 from .thumbnails import ThumbnailSidebar
 from .writer import EncryptionWouldBeLost, SaveError, commit, write_pdf
 
-APP_NAME = "ButterPDF"
+APP_NAME = "SilverbowPDF"
 
 ZOOM_PRESETS = [
     ("Fit width", "fit-width"),

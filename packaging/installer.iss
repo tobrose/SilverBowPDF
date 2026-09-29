@@ -1,28 +1,29 @@
-; Inno Setup script for ButterPDF.
+; Inno Setup script for SilverbowPDF.
 ;
 ; Build:  iscc packaging\installer.iss
-; Output: packaging\out\ButterPDF-Setup-<version>.exe
+; Output: packaging\out\SilverbowPDF-Setup-<version>.exe
 ;
 ; Interactive:  double-click, Next, Install, done.
 ; Silent (GPO or any deployment tool):
-;     ButterPDF-Setup-<version>.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+;     SilverbowPDF-Setup-<version>.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 ; Silent uninstall:
-;     "%ProgramFiles%\ButterPDF\unins000.exe" /VERYSILENT /NORESTART
+;     "%ProgramFiles%\SilverbowPDF\unins000.exe" /VERYSILENT /NORESTART
 
-#define AppName "ButterPDF"
+#define AppName "SilverbowPDF"
 ; build.ps1 passes /DAppVersion=<pdfapp.__version__>; this is only the
 ; fallback for compiling by hand.
 #ifndef AppVersion
   #define AppVersion "0.0.0-dev"
 #endif
-#define AppPublisher "ButterPDF"
-#define AppExeName "ButterPDF.exe"
+#define AppPublisher "SilverbowPDF"
+#define AppExeName "SilverbowPDF.exe"
 
 [Setup]
 ; AppId must never change across versions -- it is how Windows recognises an
 ; upgrade rather than a second parallel install. Generate one GUID, once, and
-; leave it alone forever.
-AppId={{8F3C21A4-6D5E-4B7A-9E14-2C7B5A9D3E60}
+; leave it alone forever. (Replaced once, at the rename from ButterPDF, while
+; nothing was deployed that needed upgrading.)
+AppId={{06C43E6D-74E9-4B84-87AC-61182901A507}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppVerName={#AppName} {#AppVersion}
@@ -74,9 +75,9 @@ Name: "lockletterkeys"; Description: "Lock single-letter tool shortcuts off for 
     GroupDescription: "Administrator policy:"; Flags: unchecked
 
 [Files]
-; PyInstaller onedir output. Everything under dist\ButterPDF\.
-Source: "..\dist\ButterPDF\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\dist\ButterPDF\*"; DestDir: "{app}"; \
+; PyInstaller onedir output. Everything under dist\SilverbowPDF\.
+Source: "..\dist\SilverbowPDF\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\SilverbowPDF\*"; DestDir: "{app}"; \
     Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
@@ -93,17 +94,17 @@ Root: HKA; Subkey: "Software\Classes\Applications\{#AppExeName}\shell\open\comma
     Flags: uninsdeletekey
 
 ; Only if the user opted in.
-Root: HKA; Subkey: "Software\Classes\ButterPDF.Document"; \
+Root: HKA; Subkey: "Software\Classes\SilverbowPDF.Document"; \
     ValueType: string; ValueName: ""; ValueData: "PDF Document"; \
     Flags: uninsdeletekey; Tasks: associate
-Root: HKA; Subkey: "Software\Classes\ButterPDF.Document\DefaultIcon"; \
+Root: HKA; Subkey: "Software\Classes\SilverbowPDF.Document\DefaultIcon"; \
     ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExeName},0"; \
     Flags: uninsdeletekey; Tasks: associate
-Root: HKA; Subkey: "Software\Classes\ButterPDF.Document\shell\open\command"; \
+Root: HKA; Subkey: "Software\Classes\SilverbowPDF.Document\shell\open\command"; \
     ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}"" ""%1"""; \
     Flags: uninsdeletekey; Tasks: associate
 Root: HKA; Subkey: "Software\Classes\.pdf"; \
-    ValueType: string; ValueName: ""; ValueData: "ButterPDF.Document"; \
+    ValueType: string; ValueName: ""; ValueData: "SilverbowPDF.Document"; \
     Flags: uninsdeletevalue; Tasks: associate
 
 ; Policy lives under HKLM\Software\Policies so GPO or deployment tooling can set the same

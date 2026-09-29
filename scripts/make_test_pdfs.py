@@ -181,7 +181,7 @@ def build_main(path: Path, encryption=None) -> None:
         for i, (label, *_rest) in enumerate(PAGES):
             outline.root.append(pikepdf.OutlineItem(f"{i + 1}. {label}", i))
 
-    pdf.docinfo.Title = "ButterPDF test pages"
+    pdf.docinfo.Title = "SilverbowPDF test pages"
     pdf.save(path, encryption=encryption)
 
 
@@ -194,7 +194,7 @@ def build_long(path: Path, count: int = 300) -> None:
         page.Resources = Dictionary(Font=fonts)
         page.Contents = pdf.make_stream(
             _page_content(num, count, "Long document", *LETTER).encode("latin-1"))
-    pdf.docinfo.Title = "ButterPDF long test"
+    pdf.docinfo.Title = "SilverbowPDF long test"
     pdf.save(path)
 
 

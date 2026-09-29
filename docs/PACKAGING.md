@@ -12,7 +12,7 @@ winget install JRSoftware.InnoSetup
 .\packaging\build.ps1
 ```
 
-Output: `packaging\out\ButterPDF-Setup-<version>.exe`, the version
+Output: `packaging\out\SilverbowPDF-Setup-<version>.exe`, the version
 taken from `pdfapp/__init__.py`. Double-click, Next,
 Install. For deployment tooling: `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`.
 
@@ -97,8 +97,8 @@ no update mechanism and you'll end up supporting four versions at once.
 
 ## Administrator policy
 
-Settings users choose live in `HKCU\Software\ButterPDF`; policy set by IT
-lives in `HKLM\Software\Policies\ButterPDF` and wins, with the matching
+Settings users choose live in `HKCU\Software\SilverbowPDF`; policy set by IT
+lives in `HKLM\Software\Policies\SilverbowPDF` and wins, with the matching
 menu item shown as "set by administrator". On a non-persistent desktop
 policy is the reliable place: HKLM is part of the machine image, while HKCU may not
 survive logoff.

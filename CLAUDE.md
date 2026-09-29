@@ -1,4 +1,4 @@
-# ButterPDF
+# SilverbowPDF
 
 Desktop PDF viewer and editor. Python 3.11+ / PySide6 / pdfium.
 
@@ -220,7 +220,7 @@ name the active tool ("Annotate: Rectangle").
 
 Single-letter tool shortcuts are OFF by default (user's call: their users
 are mouse-only). Tools menu toggle (HKCU); administrator policy
-HKLM\Software\Policies\ButterPDF\SingleKeyShortcuts locks it either way
+HKLM\Software\Policies\SilverbowPDF\SingleKeyShortcuts locks it either way
 (settings.py; installer task lockletterkeys). Ctrl shortcuts always on.
 Tests pass INI-backed QSettings -- never touch the real registry.
 

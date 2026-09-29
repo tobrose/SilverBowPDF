@@ -302,7 +302,7 @@ def _common(annot: Annot, subtype: str) -> Dictionary:
         Rect=Array(list(annot.rect)),
         Contents=String(annot.contents),
         T=String(annot.author),
-        NM=String(f"butterpdf-{uuid.uuid4()}"),
+        NM=String(f"silverbowpdf-{uuid.uuid4()}"),
         M=String(now), CreationDate=String(now),
         F=4,  # Print
     )
@@ -344,7 +344,7 @@ def build_annot(pdf: pikepdf.Pdf, annot: Annot) -> pikepdf.Object:
             Contents=String(annot.contents),
             T=String(annot.author),
             C=Array(list(annot.color)),
-            NM=String(f"butterpdf-{uuid.uuid4()}"),
+            NM=String(f"silverbowpdf-{uuid.uuid4()}"),
             M=String(now), CreationDate=String(now),
             F=4,  # Print
         )
@@ -382,7 +382,7 @@ def build_annot(pdf: pikepdf.Pdf, annot: Annot) -> pikepdf.Object:
         d = Dictionary(
             Type=Name.Annot, Subtype=Name.FreeText,
             T=String(annot.author),
-            NM=String(f"butterpdf-{uuid.uuid4()}"),
+            NM=String(f"silverbowpdf-{uuid.uuid4()}"),
             M=String(now), CreationDate=String(now),
             F=4,  # Print
         )
@@ -397,7 +397,7 @@ def build_annot(pdf: pikepdf.Pdf, annot: Annot) -> pikepdf.Object:
             T=String(annot.author),
             C=Array(list(annot.color)),
             Name=Name.Comment,
-            NM=String(f"butterpdf-{uuid.uuid4()}"),
+            NM=String(f"silverbowpdf-{uuid.uuid4()}"),
             M=String(now), CreationDate=String(now),
             F=4,  # Print
             Open=False,

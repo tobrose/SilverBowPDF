@@ -1,4 +1,4 @@
-# Build ButterPDF into a single-click Windows installer.
+# Build SilverbowPDF into a single-click Windows installer.
 #
 #   .\packaging\build.ps1              full build
 #   .\packaging\build.ps1 -SkipTests   skip the test gate (don't)
@@ -51,10 +51,10 @@ Step "Running PyInstaller"
 & $venvPython -m PyInstaller packaging\pdfapp.spec --noconfirm --clean
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed." }
 
-$exe = "dist\ButterPDF\ButterPDF.exe"
+$exe = "dist\SilverbowPDF\SilverbowPDF.exe"
 if (-not (Test-Path $exe)) { throw "Expected $exe, not found." }
 
-$sizeMB = [math]::Round((Get-ChildItem dist\ButterPDF -Recurse |
+$sizeMB = [math]::Round((Get-ChildItem dist\SilverbowPDF -Recurse |
     Measure-Object -Property Length -Sum).Sum / 1MB, 1)
 Write-Host "Frozen bundle: $sizeMB MB" -ForegroundColor Green
 

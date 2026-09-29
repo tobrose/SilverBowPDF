@@ -2,10 +2,10 @@
 
 Two places, the usual Windows split:
 
-  HKCU\\Software\\ButterPDF             the user's own choices (Tools menu)
-  HKLM\\Software\\Policies\\ButterPDF   set by IT (GPO, deployment tooling, or the
-                                       installer's task); wins over the user,
-                                       and the menu shows it's locked
+  HKCU\\Software\\SilverbowPDF             the user's own choices (Tools menu)
+  HKLM\\Software\\Policies\\SilverbowPDF   set by IT (GPO, deployment tooling, or the
+                                          installer's task); wins over the user,
+                                          and the menu shows it's locked
 
 Policy matters on a non-persistent desktop: a user's HKCU choices may
 not survive logoff unless profile management roams them, but HKLM is in
@@ -22,8 +22,8 @@ from typing import Optional
 
 from PySide6.QtCore import QSettings
 
-USER_KEY = "ButterPDF"
-POLICY_PATH = r"HKEY_LOCAL_MACHINE\Software\Policies\ButterPDF"
+USER_KEY = "SilverbowPDF"
+POLICY_PATH = r"HKEY_LOCAL_MACHINE\Software\Policies\SilverbowPDF"
 
 LETTER_SHORTCUTS = "SingleKeyShortcuts"  # 1 on, 0 off (default: off)
 

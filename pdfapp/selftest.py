@@ -1,4 +1,4 @@
-"""`ButterPDF.exe --self-test [logfile]`: prove a build actually works.
+"""`SilverbowPDF.exe --self-test [logfile]`: prove a build actually works.
 
 A frozen app that launches can still be missing the one DLL or data file a
 real operation needs -- pdfium's version.json, qpdf's runtime, Qt's platform
@@ -7,7 +7,7 @@ the real code paths (render through pdfium into a QImage, edit, save through
 pikepdf, reopen, open an encrypted file) against generated PDFs, writes a
 report, and exits 0 on success, 1 on any failure. No window is shown.
 
-Default log: %TEMP%\\ButterPDF-selftest.log
+Default log: %TEMP%\\SilverbowPDF-selftest.log
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from typing import Callable, List, Optional
 
 
 def run(log_path: Optional[str] = None) -> int:
-    log = Path(log_path) if log_path else Path(tempfile.gettempdir()) / "ButterPDF-selftest.log"
+    log = Path(log_path) if log_path else Path(tempfile.gettempdir()) / "SilverbowPDF-selftest.log"
     lines: List[str] = []
     failures = 0
 
@@ -39,12 +39,12 @@ def run(log_path: Optional[str] = None) -> int:
                 "      " + l for l in traceback.format_exc().splitlines(True)))
 
     from pdfapp import __version__
-    lines.append(f"ButterPDF {__version__} self-test  {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append(f"SilverbowPDF {__version__} self-test  {time.strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append(f"python {platform.python_version()}  frozen={getattr(sys, 'frozen', False)}  "
                  f"{platform.platform()}  exe={sys.executable}")
 
     state: dict = {}
-    work = Path(tempfile.mkdtemp(prefix="butterpdf-selftest-"))
+    work = Path(tempfile.mkdtemp(prefix="silverbowpdf-selftest-"))
 
     def imports() -> str:
         import pikepdf
