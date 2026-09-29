@@ -231,6 +231,26 @@ class MainWindow(QMainWindow):
             Tool.FIELD_TEXT: self.act_field_text, Tool.FIELD_MULTILINE: self.act_field_multiline,
             Tool.FIELD_CHECKBOX: self.act_field_checkbox, Tool.FIELD_COMBO: self.act_field_combo,
         }
+        # Everything that marks up the page, grouped as the toolbar shows it.
+        self.annotate_menu = QMenu("Annotate", self)
+        self.annotate_menu.addAction(self.act_tool_note)
+        self.annotate_menu.addSeparator()
+        for act in (self.act_tool_highlight, self.act_tool_underline, self.act_tool_strikeout):
+            self.annotate_menu.addAction(act)
+        self.annotate_menu.addSeparator()
+        for act in (self.act_tool_typewriter, self.act_tool_textbox):
+            self.annotate_menu.addAction(act)
+        self.annotate_menu.addSeparator()
+        for act in (self.act_tool_rect, self.act_tool_ellipse, self.act_tool_line,
+                    self.act_tool_arrow, self.act_tool_pen):
+            self.annotate_menu.addAction(act)
+        self.annotate_menu.addSeparator()
+        self.annotate_tools = {Tool.NOTE, Tool.HIGHLIGHT, Tool.UNDERLINE, Tool.STRIKEOUT,
+                               Tool.TYPEWRITER, Tool.TEXTBOX, Tool.RECT, Tool.ELLIPSE,
+                               Tool.LINE, Tool.ARROW, Tool.PEN, Tool.STAMP}
+        self.form_tools = {Tool.FORM, Tool.FIELD_TEXT, Tool.FIELD_MULTILINE,
+                           Tool.FIELD_CHECKBOX, Tool.FIELD_COMBO}
+
         self.form_menu = QMenu("Form", self)
         self.form_menu.addAction(self.act_tool_form)
         self.form_menu.addSeparator()
@@ -277,6 +297,11 @@ class MainWindow(QMainWindow):
             text = label.title() + ("  (name & date)" if dated else "")
             act = self.stamp_menu.addAction(self._swatch(color), text)
             act.triggered.connect(lambda _=False, st=stamp: self._pick_stamp(st))
+
+        self.annotate_menu.addMenu(self.stamp_menu)
+        self.annotate_menu.addSeparator()
+        for menu in (self.highlight_menu, self.text_menu, self.shape_menu):
+            self.annotate_menu.addMenu(menu)
 
         self.act_copy = QAction("&Copy", self, shortcut=QKeySequence.Copy, triggered=self.copy_text)
         self.act_copy.setEnabled(False)
@@ -339,44 +364,17 @@ class MainWindow(QMainWindow):
         tools.setMovable(False)
         self.addToolBar(tools)
         tools.addAction(self.act_tool_select)
-        tools.addAction(self.act_tool_note)
-        tools.addSeparator()
-        # The highlighter carries its colour menu on the button's arrow.
-        highlight = QToolButton(self)
-        highlight.setDefaultAction(self.act_tool_highlight)
-        highlight.setMenu(self.highlight_menu)
-        highlight.setPopupMode(QToolButton.MenuButtonPopup)
-        tools.addWidget(highlight)
-        tools.addAction(self.act_tool_underline)
-        tools.addAction(self.act_tool_strikeout)
-        tools.addSeparator()
-        typewriter = QToolButton(self)
-        typewriter.setDefaultAction(self.act_tool_typewriter)
-        typewriter.setMenu(self.text_menu)
-        typewriter.setPopupMode(QToolButton.MenuButtonPopup)
-        tools.addWidget(typewriter)
-        tools.addAction(self.act_tool_textbox)
-        tools.addSeparator()
-        rect = QToolButton(self)
-        rect.setDefaultAction(self.act_tool_rect)
-        rect.setMenu(self.shape_menu)
-        rect.setPopupMode(QToolButton.MenuButtonPopup)
-        tools.addWidget(rect)
-        for act in (self.act_tool_ellipse, self.act_tool_line, self.act_tool_arrow,
-                    self.act_tool_pen):
-            tools.addAction(act)
-        stamp = QToolButton(self)
-        stamp.setDefaultAction(self.act_tool_stamp)
-        stamp.setMenu(self.stamp_menu)
-        # The button itself opens the list: a stamp without a choice is useless.
-        stamp.setPopupMode(QToolButton.InstantPopup)
-        tools.addWidget(stamp)
-        tools.addSeparator()
-        form = QToolButton(self)
-        form.setDefaultAction(self.act_tool_form)
-        form.setMenu(self.form_menu)
-        form.setPopupMode(QToolButton.MenuButtonPopup)
-        tools.addWidget(form)
+        # Two drop-down buttons hold everything else (user's layout). Their
+        # labels stay put -- "Annotate", "Form" -- and name the active tool
+        # while one of theirs is in use (see _on_tool_changed).
+        self.annotate_button = QToolButton(self, text="Annotate")
+        self.annotate_button.setMenu(self.annotate_menu)
+        self.annotate_button.setPopupMode(QToolButton.InstantPopup)
+        tools.addWidget(self.annotate_button)
+        self.form_button = QToolButton(self, text="Form")
+        self.form_button.setMenu(self.form_menu)
+        self.form_button.setPopupMode(QToolButton.InstantPopup)
+        tools.addWidget(self.form_button)
         self.view.tool_changed.connect(self._on_tool_changed)
         self.view.editing_changed.connect(self._on_editing_changed)
         self.view.message.connect(lambda text: self.statusBar().showMessage(text, 8000))
@@ -401,12 +399,8 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(self.act_delete_annot)
 
         tools_menu = self.menuBar().addMenu("&Tools")
-        for act in self.tool_actions.values():
-            tools_menu.addAction(act)
-        tools_menu.addMenu(self.highlight_menu)
-        tools_menu.addMenu(self.text_menu)
-        tools_menu.addMenu(self.shape_menu)
-        tools_menu.addMenu(self.stamp_menu)
+        tools_menu.addAction(self.act_tool_select)
+        tools_menu.addMenu(self.annotate_menu)
         tools_menu.addMenu(self.form_menu)
 
         view_menu = self.menuBar().addMenu("&View")
@@ -664,7 +658,12 @@ class MainWindow(QMainWindow):
         self._on_forms_edit(doc.page_key(index), widgets, f"Edit {changed.short_name()}", rename)
 
     def _on_tool_changed(self, tool: Tool) -> None:
-        self.tool_actions[tool].setChecked(True)
+        act = self.tool_actions[tool]
+        act.setChecked(True)
+        name = act.text().replace("&", "")
+        self.annotate_button.setText(f"Annotate: {name}" if tool in self.annotate_tools
+                                     else "Annotate")
+        self.form_button.setText(f"Form: {name}" if tool in self.form_tools else "Form")
 
     @staticmethod
     def _swatch(color) -> QIcon:

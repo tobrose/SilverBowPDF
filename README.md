@@ -50,7 +50,8 @@ on a headless box.
 | `R` / `E` / `L` / `A` / `P` | Rectangle / Ellipse / Line / Arrow / Pen -- drag to draw; `Shift` squares or snaps to 45 degrees |
 | Stamp button | Pick a stamp, click to place it |
 | Click a form field | Type into it (`Tab` for the next field), tick a box, or pick from a list |
-| Form button | Edit Fields (move, resize, delete, double-click for properties) or draw a new text field, checkbox or dropdown |
+| Annotate button | Every markup tool: notes, highlight/underline/strike, typewriter, text box, shapes, pen, stamps, styles |
+| Form button | Edit Fields (move, resize, delete, double-click for properties; click empty page to finish) or draw a new text field, checkbox or dropdown |
 | Click, drag, `Delete` | Select, move, delete an annotation |
 | Double-click an annotation | Edit its comment |
 | `PgUp` `PgDn` `Ctrl+Home` `Ctrl+End` `Ctrl+G` | Navigation |

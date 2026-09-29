@@ -210,7 +210,13 @@ deleted widget becomes a null /Annots placeholder so annotation edits'
 indices hold, and nulls are dropped just before prune_dangling (which drops
 the deleted fields from /AcroForm). A flat PDF gains an /AcroForm with Helv
 and ZaDb. New fields are fillable before saving (current_widgets).
-Radio-button creation is not built (filling radios is).
+Radio-button creation is not built (filling radios is). Clicking empty page
+in Edit Fields returns to Select (user's rule, as everywhere).
+
+Toolbar / Tools menu layout (user's): Select, Annotate (drop-down: note,
+text markup, typewriter/text box, shapes/pen, stamps, style menus), Form
+(drop-down: Edit Fields + field tools). The buttons keep their labels and
+name the active tool ("Annotate: Rectangle"). Keyboard shortcuts unchanged.
 
 Next, in order (user chose all of these): shapes, ink, stamps;
 authoring fillable form fields; form filling; encryption; OCR for scanned

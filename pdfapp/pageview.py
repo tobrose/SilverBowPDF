@@ -966,9 +966,13 @@ class PdfView(QScrollArea):
 
     def _form_press(self, page: "PageWidget", pos: QPoint) -> bool:
         widget = self._field_at(page, pos)
-        self.select_field(page.index, widget.ident if widget else None)
         if widget is None:
+            # Clicking away from the fields means done preparing the form
+            # (user's rule, as for text boxes and shapes): back to Select.
+            self.select_field(page.index, None)
+            self.set_tool(Tool.SELECT)
             return True
+        self.select_field(page.index, widget.ident)
         edges = self._edges_of(page, widget, pos)
         start = page.widget_transform().pdf_rect_to_widget(widget.rect)
         self._drag = {"mode": "fresize" if edges else "fmove", "page": page, "widget": widget,
