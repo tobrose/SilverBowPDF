@@ -17,7 +17,10 @@ import pikepdf  # noqa: E402
 from pikepdf import Array, Dictionary, Name, String  # noqa: E402
 
 from pdfapp.document import PdfDocument  # noqa: E402
-from pdfapp.fields import CHECKBOX, COMBO, RADIO, TEXT, FieldEdits, is_on  # noqa: E402
+from dataclasses import replace  # noqa: E402
+
+from pdfapp.fields import (  # noqa: E402
+    CHECKBOX, COMBO, RADIO, TEXT, FieldEdits, FormEdits, is_on, new_field)
 from pdfapp.writer import commit, write_pdf  # noqa: E402
 from test_annots import _differing_pixels, _render, _shown  # noqa: E402
 
@@ -217,6 +220,124 @@ def test_filling_a_merged_copy_of_the_same_form():
             copy = {w.name: w.value for w in saved.page_widgets(1)}
             assert first["name"] == "Original"
             assert copy["name+1"] == "The copy", copy
+
+
+# ---- creating and editing fields ---------------------------------------------------
+
+def _flat_pdf(path):
+    pdf = pikepdf.Pdf.new()
+    helv = pdf.make_indirect(Dictionary(Type=Name.Font, Subtype=Name.Type1, BaseFont=Name.Helvetica))
+    pdf.add_blank_page(page_size=(612, 792))
+    pdf.pages[0].Resources = Dictionary(Font=Dictionary(F1=helv))
+    pdf.pages[0].Contents = pdf.make_stream(
+        b"BT /F1 12 Tf 72 740 Td (A flat document) Tj ET "
+        b"0.5 G 72 690 m 400 690 l S 72 600 m 400 600 l S")
+    pdf.save(path)
+
+
+def _new_fields():
+    return (new_field(TEXT, "Full name", (72, 692, 400, 712)),
+            new_field(TEXT, "Comments", (72, 520, 400, 600), multiline=True),
+            new_field(CHECKBOX, "Agreed", (72, 480, 86, 494)),
+            new_field(COMBO, "Department", (72, 440, 220, 460), options=("IT", "HR", "Sales")))
+
+
+def test_flat_pdf_becomes_a_form():
+    with tempfile.TemporaryDirectory() as tmp:
+        src, out = Path(tmp, "flat.pdf"), Path(tmp, "out.pdf")
+        _flat_pdf(src)
+        with PdfDocument(src) as doc:
+            assert not doc.has_forms and doc.page_widgets(0) == ()
+            doc.forms = FormEdits().with_page(doc.page_key(0), _new_fields())
+            assert [w.name for w in doc.current_widgets(0)][0] == "Full name"
+            doc.fields = (FieldEdits().with_value((0, "Full name"), "Filled before saving")
+                          .with_value((0, "Agreed"), "Yes"))
+            preview = _shown(doc, 0, scale=1.0)
+            commit(write_pdf(doc.sources, doc.pages, out, fields=doc.fields, forms=doc.forms), out)
+        with PdfDocument(out) as saved:
+            assert saved.has_forms
+            assert _differing_pixels(_shown(saved, 0, scale=1.0), preview) == 0
+            got = {w.name: (w.kind, w.value, w.options, w.multiline) for w in saved.page_widgets(0)}
+            assert got == {
+                "Full name": (TEXT, "Filled before saving", (), False),
+                "Comments": (TEXT, "", (), True),
+                "Agreed": (CHECKBOX, "Yes", (), False),
+                "Department": (COMBO, "", ("IT", "HR", "Sales"), False),
+            }, got
+
+
+def test_editing_an_existing_form():
+    with tempfile.TemporaryDirectory() as tmp:
+        src, out = Path(tmp, "form.pdf"), Path(tmp, "out.pdf")
+        _make_form(src)
+        with PdfDocument(src) as doc:
+            doc.fields = FieldEdits().with_value((0, "colour"), "Green")
+            widgets = []
+            for w in doc.page_widgets(0):
+                if w.name == "agree":
+                    continue                                   # delete
+                if w.name == "name":
+                    w = w.moved_to((150, 720, 430, 742))       # move
+                elif w.name == "notes":
+                    w = w.moved_to((120, 500, 500, 650))       # resize
+                elif w.name == "colour":
+                    w = replace(w.renamed("favourite colour"), font_size=14,
+                                options=("Green", "Purple"))
+                widgets.append(w)
+            doc.forms = FormEdits().with_page(doc.page_key(0), widgets)
+            doc.fields = doc.fields.renamed(0, "colour", "favourite colour")
+            preview = _shown(doc, 0, scale=1.0)
+            commit(write_pdf(doc.sources, doc.pages, out, fields=doc.fields, forms=doc.forms), out)
+        with PdfDocument(out) as saved:
+            assert _differing_pixels(_shown(saved, 0, scale=1.0), preview) == 0
+            got = {w.name: w for w in saved.page_widgets(0)}
+            assert "agree" not in got and "colour" not in got
+            assert [round(v) for v in got["name"].rect] == [150, 720, 430, 742]
+            fav = got["favourite colour"]
+            assert fav.options == ("Green", "Purple") and fav.value == "Green" and fav.font_size == 14
+        with pikepdf.open(out) as pdf:
+            names = [str(f.T) for f in pdf.Root.AcroForm.Fields]
+            assert "agree" not in names, "deleted field left in /AcroForm"
+            assert not any(a is None for a in pdf.pages[0].obj.Annots), "placeholder left behind"
+
+
+def test_deleting_a_field_does_not_shift_annotation_edits():
+    """A deleted widget is a placeholder until the end, so annotation edits
+    addressed by /Annots index still hit the right annotation."""
+    from test_annots import _make_annotated_pdf
+    with tempfile.TemporaryDirectory() as tmp:
+        src, out = Path(tmp, "a.pdf"), Path(tmp, "out.pdf")
+        _make_annotated_pdf(src)      # page 2: [field widget, square, text box]
+        with PdfDocument(src) as doc:
+            doc.forms = FormEdits().with_page(doc.page_key(1), ())       # delete the field
+            moved = tuple(a.moved(0, -100) if a.kind == "Square" else a for a in doc.file_annots(1))
+            doc.annots = doc.annots.with_page(doc.page_key(1), moved)
+            preview = _shown(doc, 1, scale=1.0)
+            commit(write_pdf(doc.sources, doc.pages, out, annots=doc.annots, forms=doc.forms), out)
+        with PdfDocument(out) as saved:
+            assert _differing_pixels(_shown(saved, 1, scale=1.0), preview) == 0
+            assert saved.page_widgets(1) == ()
+            square = next(a for a in saved.file_annots(1) if a.kind == "Square")
+            assert [round(v) for v in square.rect] == [300, 100, 400, 200], "wrong annotation moved"
+            assert [a.contents for a in saved.file_annots(1) if a.kind == "FreeText"] == ["Typed elsewhere"]
+
+
+def test_new_field_on_a_merged_page():
+    with tempfile.TemporaryDirectory() as tmp:
+        base, flat, out = Path(tmp, "form.pdf"), Path(tmp, "flat.pdf"), Path(tmp, "out.pdf")
+        _make_form(base)
+        _flat_pdf(flat)
+        with PdfDocument(base) as doc:
+            f = doc.add_source(flat)
+            doc.pages = doc.pages.inserted(doc.source_refs(f), 1)
+            doc.forms = FormEdits().with_page(doc.page_key(1), _new_fields()[:1])
+            doc.fields = FieldEdits().with_value((f, "Full name"), "On the inserted page")
+            preview = _shown(doc, 1, scale=1.0)
+            commit(write_pdf(doc.sources, doc.pages, out, fields=doc.fields, forms=doc.forms), out)
+        with PdfDocument(out) as saved:
+            assert _differing_pixels(_shown(saved, 1, scale=1.0), preview) == 0
+            assert {w.name: w.value for w in saved.page_widgets(1)} == {"Full name": "On the inserted page"}
+            assert "name" in {w.name for w in saved.page_widgets(0)}, "original form intact"
 
 
 if __name__ == "__main__":

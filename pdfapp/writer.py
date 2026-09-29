@@ -27,8 +27,8 @@ import pikepdf
 
 from .annotpdf import apply_edits
 from .annots import AnnotEdits
-from .fields import FieldEdits
-from .formpdf import apply_field_edits
+from .fields import FieldEdits, FormEdits
+from .formpdf import apply_field_edits, apply_form_edits
 from .pagelist import PageList
 
 
@@ -67,6 +67,7 @@ def write_pdf(
     allow_decrypt: Collection[int] = (),
     annots: AnnotEdits = AnnotEdits(),
     fields: FieldEdits = FieldEdits(),
+    forms: FormEdits = FormEdits(),
 ) -> Path:
     """Build the edited PDF into a temp file beside `dest` and return its path.
 
@@ -80,6 +81,8 @@ def write_pdf(
 
     annots: annotation edits per (file, source page); see annots.py.
     fields: filled-in form values per (file, field name); see fields.py.
+    forms: form structure per (file, source page): fields added, moved,
+        resized, renamed, deleted; see fields.FormEdits.
     """
     dest = Path(dest)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{dest.stem}.", suffix=".tmp", dir=dest.parent)
@@ -101,8 +104,12 @@ def write_pdf(
                         f"the edit refers to page {highest + 1}. Was the file changed "
                         f"by another program?"
                     )
-                # Values in before anything is copied: field names are the
-                # source's own until _merge_forms renames clashes.
+                # Structure, then values, before anything is copied: field
+                # names are the source's own until _merge_forms renames
+                # clashes, and values may belong to fields added here.
+                for (ff, source_page), widgets in forms.items():
+                    if ff == f and source_page < len(pdf.pages):
+                        apply_form_edits(pdf, source_page, widgets)
                 apply_field_edits(pdf, fields.for_file(f))
                 pdfs[f] = pdf
             base = pdfs[0]
@@ -167,6 +174,13 @@ def write_pdf(
                     apply_edits(base, page.obj, edits)
 
             _import_outlines(base, pdfs, sources, foreign_origin)
+
+            # Deleted form fields left null placeholders so annotation
+            # edits' indices held; now they can go.
+            for page in base.pages:
+                annots = page.obj.get("/Annots")
+                if isinstance(annots, pikepdf.Array) and any(a is None for a in annots):
+                    page.obj.Annots = pikepdf.Array([a for a in annots if a is not None])
 
             # Always, not just after deletes: with every page kept it finds
             # nothing, and one code path is one thing to get right.

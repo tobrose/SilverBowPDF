@@ -11,7 +11,7 @@ import pypdfium2 as pdfium
 import pypdfium2.raw as pdfium_c
 
 from .annots import MARKUP_KINDS, Annot, AnnotEdits, PageKey, is_editable
-from .fields import CHECKBOX, COMBO, RADIO, TEXT, FieldEdits, Widget
+from .fields import CHECKBOX, COMBO, RADIO, TEXT, FieldEdits, FormEdits, Widget
 from .pagelist import PageList, PageRef
 from .textlayout import parse_da
 from .transform import PageTransform, normalize_rotation
@@ -111,6 +111,7 @@ class PdfDocument:
         self._pages = PageList.identity(self._sources[0].page_count)
         self._annots = AnnotEdits()
         self._fields = FieldEdits()
+        self._forms = FormEdits()
         self._file_annots: Dict[PageKey, Tuple[Annot, ...]] = {}
         self._widgets: Dict[PageKey, Tuple[Widget, ...]] = {}
         self._closed = False
@@ -210,6 +211,20 @@ class PdfDocument:
     @fields.setter
     def fields(self, fields: FieldEdits) -> None:
         self._fields = fields
+
+    @property
+    def forms(self) -> FormEdits:
+        return self._forms
+
+    @forms.setter
+    def forms(self, forms: FormEdits) -> None:
+        self._forms = forms
+
+    def current_widgets(self, index: int) -> Tuple[Widget, ...]:
+        """The page's widgets as currently edited (fields added, moved,
+        deleted...); the file's when its form structure is unchanged."""
+        edited = self._forms.get(self.page_key(index))
+        return edited if edited is not None else self.page_widgets(index)
 
     def page_widgets(self, index: int) -> Tuple[Widget, ...]:
         """The page's form widgets as the file has them (values included).

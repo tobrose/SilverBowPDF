@@ -209,6 +209,130 @@ def _text_appearance(pdf: pikepdf.Pdf, widget: Dictionary, value: str) -> pikepd
     return stream
 
 
+# ---- form structure: new fields, moved / resized / renamed / deleted ones --------
+
+def ensure_acroform(pdf: pikepdf.Pdf) -> Dictionary:
+    """The document's /AcroForm, created if it's a flat PDF gaining fields,
+    with the two fonts new fields use in its default resources."""
+    form = pdf.Root.get("/AcroForm")
+    if not isinstance(form, Dictionary):
+        form = pdf.Root.AcroForm = pdf.make_indirect(Dictionary(Fields=Array()))
+    if "/Fields" not in form:
+        form.Fields = Array()
+    if "/DA" not in form:
+        form.DA = String("/Helv 0 Tf 0 g")
+    if "/DR" not in form:
+        form.DR = Dictionary()
+    if "/Font" not in form.DR:
+        form.DR.Font = Dictionary()
+    fonts = form.DR.Font
+    if "/Helv" not in fonts:
+        fonts.Helv = pdf.make_indirect(Dictionary(Type=Name.Font, Subtype=Name.Type1,
+                                                  BaseFont=Name.Helvetica,
+                                                  Encoding=Name.WinAnsiEncoding))
+    if "/ZaDb" not in fonts:
+        fonts.ZaDb = pdf.make_indirect(Dictionary(Type=Name.Font, Subtype=Name.Type1,
+                                                  BaseFont=Name.ZapfDingbats))
+    return form
+
+
+def _checkbox_appearances(pdf: pikepdf.Pdf, w: float, h: float) -> Dictionary:
+    """On: a check mark in a box. Off: the box. ZapfDingbats '4' is the
+    check mark every viewer uses for check boxes."""
+    size = min(w, h) * 0.8
+    x = (w - 0.846 * size) / 2
+    y = (h - size * 0.7) / 2
+    box = f"q 0 G 1 w 0.5 0.5 {w - 1:.3f} {h - 1:.3f} re S Q"
+    zadb = pdf.make_indirect(Dictionary(Type=Name.Font, Subtype=Name.Type1,
+                                        BaseFont=Name.ZapfDingbats))
+
+    def form(ops: str) -> pikepdf.Stream:
+        st = pdf.make_stream(ops.encode())
+        st.Type, st.Subtype, st.BBox = Name.XObject, Name.Form, Array([0, 0, w, h])
+        st.Resources = Dictionary(Font=Dictionary(ZaDb=zadb))
+        return st
+
+    on = form(f"{box} q BT /ZaDb {size:.3f} Tf 0 g 1 0 0 1 {x:.3f} {y:.3f} Tm (4) Tj ET Q")
+    off = form(box)
+    return Dictionary(N=Dictionary(Yes=on, Off=off))
+
+
+def _new_widget(pdf: pikepdf.Pdf, page: Dictionary, w) -> Dictionary:
+    """A field created here: one dictionary that is both field and widget."""
+    x0, y0, x1, y1 = w.rect
+    d = Dictionary(Type=Name.Annot, Subtype=Name.Widget, T=String(w.name), Rect=Array(list(w.rect)),
+                   P=page, F=4, Ff=int(w.flags), BS=Dictionary(W=1, S=Name.S))
+    size = f"{w.font_size:g}" if w.font_size else "0"
+    if w.kind == "checkbox":
+        d.FT = Name.Btn
+        d.V = d.AS = Name.Off
+        d.DA = String("/ZaDb 0 Tf 0 g")
+        d.MK = Dictionary(BC=Array([0]), CA=String("4"))
+        d.AP = _checkbox_appearances(pdf, x1 - x0, y1 - y0)
+    else:
+        d.FT = Name.Ch if w.kind == "combo" else Name.Tx
+        d.V = String("")
+        d.DA = String(f"/Helv {size} Tf 0 g")
+        d.MK = Dictionary(BC=Array([0.55]))
+        if w.kind == "combo":
+            d.Opt = Array([String(o) for o in w.options])
+        d = pdf.make_indirect(d)
+        d.AP = Dictionary(N=_text_appearance(pdf, d, ""))
+        return d
+    return pdf.make_indirect(d)
+
+
+def _update_widget(pdf: pikepdf.Pdf, d: Dictionary, w) -> None:
+    """An existing field moved, resized or given new properties."""
+    holder = d if "/T" in d or not isinstance(d.get("/Parent"), Dictionary) else d.Parent
+    d.Rect = Array(list(w.rect))
+    holder.Ff = int(w.flags)
+    last = w.name.rsplit(".", 1)[-1]
+    if str(holder.get("/T", "")) != last:
+        holder.T = String(last)
+    if w.kind in ("text", "combo"):
+        size, color = parse_da(str(_inherited(d, "/DA") or ""), default_size=0.0)
+        if w.font_size != size:
+            rgb = " ".join(f"{c:g}" for c in color)
+            holder.DA = String(f"/Helv {w.font_size:g} Tf {rgb} rg")
+        if w.kind == "combo":
+            holder.Opt = Array([String(o) for o in w.options])
+        # Its old appearance was drawn for the old size and properties.
+        value = _inherited(d, "/V")
+        d.AP = Dictionary(N=_text_appearance(pdf, d, str(value) if value is not None else ""))
+
+
+def apply_form_edits(pdf: pikepdf.Pdf, page_index: int, widgets) -> None:
+    """Make page `page_index`'s widgets match `widgets` (see fields.FormEdits).
+
+    A deleted widget's /Annots entry becomes null rather than disappearing:
+    annotation edits applied later address /Annots by index, so nothing may
+    shift. The writer drops the nulls at the end; prune_dangling drops the
+    deleted fields from /AcroForm. New fields go at the end of /Annots.
+    """
+    page = pdf.pages[page_index].obj
+    original = list(page.get("/Annots") or [])
+    by_origin = {w.origin: w for w in widgets if w.origin is not None}
+    result = []
+    for i, d in enumerate(original):
+        if isinstance(d, Dictionary) and d.get("/Subtype") == Name.Widget:
+            w = by_origin.get(i)
+            if w is None:
+                result.append(None)  # deleted: placeholder keeps later indices
+                continue
+            if w.changed:
+                _update_widget(pdf, d, w)
+        result.append(d)
+    new = [w for w in widgets if w.origin is None]
+    if new:
+        form = ensure_acroform(pdf)
+        for w in new:
+            d = _new_widget(pdf, page, w)
+            result.append(d)
+            form.Fields.append(d)
+    page.Annots = Array(result)
+
+
 def need_appearances(pdf: pikepdf.Pdf) -> bool:
     form = pdf.Root.get("/AcroForm")
     return isinstance(form, Dictionary) and bool(form.get("/NeedAppearances", False))

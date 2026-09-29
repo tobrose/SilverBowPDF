@@ -198,6 +198,20 @@ flattened) that pdfium's form engine draws in place of the file's fields,
 with /NeedAppearances set as the saved file will have it (pdfium redraws
 fields when it's set -- measured). Verified on the user's real form.
 
+Stage 5b, creating fields (Form menu): Edit Fields (select, drag to move,
+edges to resize, Delete, double-click for properties: name, required,
+read-only, multi-line, font size, dropdown options) plus Text Field /
+Multi-line / Checkbox / Dropdown tools (drag, or click for a standard size;
+then back to Edit Fields with the new field selected; a dropdown opens its
+properties). Auto-named "Text 1"... FormEdits (page key -> complete widget
+list, like AnnotEdits) in DocState; renaming migrates filled values. The
+writer applies structure then values to each source before copying; a
+deleted widget becomes a null /Annots placeholder so annotation edits'
+indices hold, and nulls are dropped just before prune_dangling (which drops
+the deleted fields from /AcroForm). A flat PDF gains an /AcroForm with Helv
+and ZaDb. New fields are fillable before saving (current_widgets).
+Radio-button creation is not built (filling radios is).
+
 Next, in order (user chose all of these): shapes, ink, stamps;
 authoring fillable form fields; form filling; encryption; OCR for scanned
 pages (user confirmed it's required; engine not chosen -- weigh machine-image

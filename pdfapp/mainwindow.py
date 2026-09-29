@@ -11,7 +11,12 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QPlainTextEdit,
     QDockWidget,
     QFileDialog,
     QInputDialog,
@@ -40,6 +45,13 @@ from .annots import (
 )
 from .document import DocumentError, PasswordRequired, PdfDocument, SourceInfo
 from .pagelist import History, PageList
+from .fields import (
+    COMBO,
+    FLAG_MULTILINE,
+    FLAG_READONLY,
+    FLAG_REQUIRED,
+    TEXT,
+)
 from .pageview import FitMode, PdfView, Tool
 from .thumbnails import ThumbnailSidebar
 from .writer import EncryptionWouldBeLost, SaveError, commit, write_pdf
@@ -77,6 +89,8 @@ class MainWindow(QMainWindow):
         self.view.customContextMenuRequested.connect(self._page_context_menu)
         self.view.annots_edit.connect(self._on_annots_edit)
         self.view.fields_edit.connect(self._on_fields_edit)
+        self.view.forms_edit.connect(self._on_forms_edit)
+        self.view.field_properties.connect(self._edit_field_properties)
         self.view.annot_open.connect(self._on_annot_open)
         self.view.note_requested.connect(self._on_note_requested)
 
@@ -201,6 +215,11 @@ class MainWindow(QMainWindow):
         self.act_tool_arrow = tool("Arrow", "A", Tool.ARROW)
         self.act_tool_pen = tool("Pen", "P", Tool.PEN)
         self.act_tool_stamp = tool("Stamp", None, Tool.STAMP)
+        self.act_tool_form = tool("Edit Fields", None, Tool.FORM)
+        self.act_field_text = tool("Text Field", None, Tool.FIELD_TEXT)
+        self.act_field_multiline = tool("Multi-line Text Field", None, Tool.FIELD_MULTILINE)
+        self.act_field_checkbox = tool("Checkbox", None, Tool.FIELD_CHECKBOX)
+        self.act_field_combo = tool("Dropdown", None, Tool.FIELD_COMBO)
         self.tool_actions = {
             Tool.SELECT: self.act_tool_select, Tool.NOTE: self.act_tool_note,
             Tool.HIGHLIGHT: self.act_tool_highlight, Tool.UNDERLINE: self.act_tool_underline,
@@ -208,8 +227,16 @@ class MainWindow(QMainWindow):
             Tool.TEXTBOX: self.act_tool_textbox, Tool.RECT: self.act_tool_rect,
             Tool.ELLIPSE: self.act_tool_ellipse, Tool.LINE: self.act_tool_line,
             Tool.ARROW: self.act_tool_arrow, Tool.PEN: self.act_tool_pen,
-            Tool.STAMP: self.act_tool_stamp,
+            Tool.STAMP: self.act_tool_stamp, Tool.FORM: self.act_tool_form,
+            Tool.FIELD_TEXT: self.act_field_text, Tool.FIELD_MULTILINE: self.act_field_multiline,
+            Tool.FIELD_CHECKBOX: self.act_field_checkbox, Tool.FIELD_COMBO: self.act_field_combo,
         }
+        self.form_menu = QMenu("Form", self)
+        self.form_menu.addAction(self.act_tool_form)
+        self.form_menu.addSeparator()
+        for act in (self.act_field_text, self.act_field_multiline, self.act_field_checkbox,
+                    self.act_field_combo):
+            self.form_menu.addAction(act)
         for act in self.tool_actions.values():
             self.tool_group.addAction(act)
 
@@ -344,6 +371,12 @@ class MainWindow(QMainWindow):
         # The button itself opens the list: a stamp without a choice is useless.
         stamp.setPopupMode(QToolButton.InstantPopup)
         tools.addWidget(stamp)
+        tools.addSeparator()
+        form = QToolButton(self)
+        form.setDefaultAction(self.act_tool_form)
+        form.setMenu(self.form_menu)
+        form.setPopupMode(QToolButton.MenuButtonPopup)
+        tools.addWidget(form)
         self.view.tool_changed.connect(self._on_tool_changed)
         self.view.editing_changed.connect(self._on_editing_changed)
         self.view.message.connect(lambda text: self.statusBar().showMessage(text, 8000))
@@ -374,6 +407,7 @@ class MainWindow(QMainWindow):
         tools_menu.addMenu(self.text_menu)
         tools_menu.addMenu(self.shape_menu)
         tools_menu.addMenu(self.stamp_menu)
+        tools_menu.addMenu(self.form_menu)
 
         view_menu = self.menuBar().addMenu("&View")
         view_menu.addAction(self.act_zoom_in)
@@ -518,6 +552,7 @@ class MainWindow(QMainWindow):
         doc.pages = state.pages
         doc.annots = state.annots
         doc.fields = state.fields
+        doc.forms = state.forms
         if pages_changed:
             current = max(0, min(len(state.pages) - 1, current))
             self.sidebar.set_document(doc)
@@ -553,6 +588,80 @@ class MainWindow(QMainWindow):
             return
         self.history.push(state, label)
         self._show_state(state, self.view.current_page)
+
+    def _on_forms_edit(self, key, widgets, label: str, rename=None) -> None:
+        if self.history is None:
+            return
+        current = self.history.current
+        fields = current.fields
+        if rename is not None:
+            fields = fields.renamed(key[0], *rename)
+        state = replace(current, forms=current.forms.with_page(key, widgets), fields=fields)
+        if state == current:
+            return
+        self.history.push(state, label)
+        self._show_state(state, self.view.current_page)
+
+    def _edit_field_properties(self, index: int, widget) -> None:
+        """Name, required / read-only, multi-line, font size, dropdown options."""
+        doc = self.view.document
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Field Properties \u2014 {widget.short_name()}")
+        form = QFormLayout(dialog)
+        name = QLineEdit(widget.short_name())
+        form.addRow("Name:", name)
+        required = QCheckBox("Required")
+        required.setChecked(bool(widget.flags & FLAG_REQUIRED))
+        readonly = QCheckBox("Read-only")
+        readonly.setChecked(bool(widget.flags & FLAG_READONLY))
+        form.addRow("", required)
+        form.addRow("", readonly)
+        multiline = QCheckBox("Multiple lines")
+        multiline.setChecked(widget.multiline)
+        size = QComboBox()
+        size.addItems(["Auto", "8", "9", "10", "11", "12", "14", "16", "18"])
+        size.setCurrentText(f"{widget.font_size:g}" if widget.font_size else "Auto")
+        options = QPlainTextEdit("\n".join(widget.options))
+        if widget.kind == TEXT:
+            form.addRow("", multiline)
+        if widget.kind in (TEXT, COMBO):
+            form.addRow("Font size:", size)
+        if widget.kind == COMBO:
+            options.setPlaceholderText("One option per line")
+            form.addRow("Options:", options)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        taken = self.view.taken_field_names(doc.pages[index].file) - {widget.name}
+        while True:
+            if dialog.exec() != QDialog.Accepted:
+                return
+            new_name = name.text().strip()
+            full = (widget.name.rsplit(".", 1)[0] + "." if "." in widget.name else "") + new_name
+            if not new_name or "." in new_name:
+                QMessageBox.warning(self, "Field name", "Give the field a name without dots.")
+            elif full in taken:
+                QMessageBox.warning(self, "Field name", f"There is already a field called "
+                                                        f"\u201c{new_name}\u201d.")
+            elif widget.kind == COMBO and not options.toPlainText().strip():
+                QMessageBox.warning(self, "Options", "A dropdown needs at least one option.")
+            else:
+                break
+        flags = widget.flags & ~(FLAG_REQUIRED | FLAG_READONLY | FLAG_MULTILINE)
+        flags |= FLAG_REQUIRED if required.isChecked() else 0
+        flags |= FLAG_READONLY if readonly.isChecked() else 0
+        if widget.kind == TEXT and multiline.isChecked():
+            flags |= FLAG_MULTILINE
+        changed = replace(widget.renamed(new_name), flags=flags, changed=True,
+                          font_size=0.0 if size.currentText() == "Auto" else float(size.currentText()),
+                          options=tuple(o.strip() for o in options.toPlainText().splitlines()
+                                        if o.strip()) if widget.kind == COMBO else widget.options)
+        if changed == replace(widget, changed=True):
+            return
+        widgets = tuple(changed if w.ident == widget.ident else w for w in doc.current_widgets(index))
+        rename = (widget.name, changed.name) if changed.name != widget.name else None
+        self._on_forms_edit(doc.page_key(index), widgets, f"Edit {changed.short_name()}", rename)
 
     def _on_tool_changed(self, tool: Tool) -> None:
         self.tool_actions[tool].setChecked(True)
@@ -872,7 +981,7 @@ class MainWindow(QMainWindow):
         while True:
             try:
                 return write_pdf(doc.sources, pages, dest, allow_decrypt=allowed,
-                                 annots=doc.annots, fields=doc.fields), allowed
+                                 annots=doc.annots, fields=doc.fields, forms=doc.forms), allowed
             except EncryptionWouldBeLost as exc:
                 if exc.file == 0 and self._same_file(dest, doc.path):
                     QMessageBox.warning(
@@ -907,7 +1016,7 @@ class MainWindow(QMainWindow):
     def _save_to(self, dest: Path) -> bool:
         """Write, swap in, reopen."""
         doc = self.view.document
-        pages, annots, fields = doc.pages, doc.annots, doc.fields
+        pages, annots, fields, forms = doc.pages, doc.annots, doc.fields, doc.forms
         written = self._write(pages, dest, "Save failed")
         if written is None:
             return False
@@ -923,7 +1032,7 @@ class MainWindow(QMainWindow):
             commit(tmp, dest)
         except SaveError as exc:
             if overwriting:
-                self._reopen(sources, keep_edits=DocState(pages, annots, fields))
+                self._reopen(sources, keep_edits=DocState(pages, annots, fields, forms))
             QMessageBox.critical(self, "Save failed", f"{exc}\n\nThe original file is unchanged.")
             return False
 
@@ -952,6 +1061,7 @@ class MainWindow(QMainWindow):
                 document.pages = keep_edits.pages
                 document.annots = keep_edits.annots
                 document.fields = keep_edits.fields
+                document.forms = keep_edits.forms
         except Exception:
             document.close()
             raise

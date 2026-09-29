@@ -25,7 +25,7 @@ import itertools
 from dataclasses import dataclass, field, replace
 from typing import Dict, Iterable, Optional, Tuple
 
-from .fields import FieldEdits
+from .fields import FieldEdits, FormEdits
 from .pagelist import PageList
 from .textlayout import bold_text_width, text_width
 from .transform import Rect, normalize_rect
@@ -456,9 +456,10 @@ class AnnotEdits:
 
 @dataclass(frozen=True)
 class DocState:
-    """Everything the undo history snapshots: pages, annotation edits and
-    form field values."""
+    """Everything the undo history snapshots: pages, annotation edits, form
+    field values and form structure."""
 
     pages: PageList
     annots: AnnotEdits = field(default_factory=AnnotEdits)
     fields: FieldEdits = field(default_factory=FieldEdits)
+    forms: FormEdits = field(default_factory=FormEdits)

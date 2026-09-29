@@ -37,7 +37,7 @@ from .annots import (
     stamp_size,
     text_box_size,
 )
-from .formpdf import apply_field_edits, flatten_widgets, need_appearances
+from .formpdf import apply_field_edits, apply_form_edits, flatten_widgets, need_appearances
 from .textlayout import ASCENT, LEADING, PADDING, bold_text_width, layout, text_width
 
 
@@ -538,20 +538,24 @@ def overlay_args(doc, index: int):
     edits = doc.annots.get(doc.page_key(index))
     forms = doc.page_has_forms(index)
     ref = doc.pages[index]
+    form_state = doc.forms.get(doc.page_key(index))
     filled = doc.fields.for_file(ref.file)
-    on_page = {w.name for w in doc.page_widgets(index)} if filled else set()
+    on_page = {w.name for w in doc.current_widgets(index)} if filled else set()
     values = tuple(sorted((n, v) for n, v in filled.items() if n in on_page)) or None
+    if values is None and form_state is not None:
+        values = ()  # structure changed: fields page, even with nothing filled
+    forms = forms or form_state is not None
     if edits is None:
-        if not (values or (forms and doc.file_annots(index))):
+        if not (values is not None or (forms and doc.file_annots(index))):
             return None
         edits = doc.file_annots(index)
     source = doc.sources[ref.file]
     media, crop, rotate = doc.page_geometry(index)
-    redraw = values is not None and any(
+    redraw = bool(values) and any(
         _needs_appearances(Path(s.path), s.password) for s in
         (doc.sources[f] for f in {0} | {r.file for r in doc.pages}))
     return (Path(source.path), source.password, ref.source, edits, media, crop, rotate, forms,
-            values, redraw)
+            values, redraw, form_state)
 
 
 @functools.lru_cache(maxsize=16)
@@ -587,6 +591,7 @@ def overlay_pdf(
     drop_widgets: bool = False,
     field_values=None,
     redraw_fields: bool = False,
+    form_state=None,
 ) -> bytes:
     """A one-page PDF holding only this page's annotations, edits applied.
 
@@ -602,11 +607,13 @@ def overlay_pdf(
     """
     with pikepdf.open(source, password=password or "") as src:
         out = pikepdf.Pdf.new()
-        if field_values:
-            # Page 1: the page's form widgets, values filled in by the same
-            # apply_field_edits the writer uses, flattened to stand-alone
-            # fields with a form of their own. pdfium's form engine draws it
-            # in place of the file's fields.
+        if field_values is not None:
+            # Page 1: the page's form widgets -- structure and values applied
+            # by the same apply_form_edits / apply_field_edits the writer
+            # uses -- flattened to stand-alone fields with a form of their
+            # own. pdfium's form engine draws it in place of the file's.
+            if form_state is not None:
+                apply_form_edits(src, page_index, form_state)
             apply_field_edits(src, dict(field_values))
             widgets, fields = flatten_widgets(src, src.pages[page_index].obj.get("/Annots") or [])
             form_page = _blank(out, mediabox, cropbox, rotate)

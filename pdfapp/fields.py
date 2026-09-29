@@ -11,12 +11,19 @@ Values are strings for every kind:
 Using the appearance-state name for buttons -- not the export value -- is
 what lets the writer set /AS on each widget without guessing.
 
+Form STRUCTURE edits (fields added, moved, resized, deleted, their
+properties changed) are FormEdits, shaped like annotation edits: for each
+changed page, the complete list of its widgets as they should end up.
+Existing widgets carry `origin` (their /Annots index); new ones have none;
+an existing widget missing from the list was deleted.
+
 No Qt, no pdfium, no pikepdf.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import itertools
+from dataclasses import dataclass, replace
 from typing import Dict, Optional, Tuple
 
 from .textlayout import text_width
@@ -28,6 +35,8 @@ TEXT, CHECKBOX, RADIO, COMBO = "text", "checkbox", "radio", "combo"
 FILLABLE = (TEXT, CHECKBOX, RADIO, COMBO)
 
 FLAG_READONLY = 1
+FLAG_REQUIRED = 2
+FLAG_COMBO = 1 << 17
 FLAG_MULTILINE = 1 << 12
 FLAG_PASSWORD = 1 << 13
 FLAG_COMB = 1 << 24
@@ -37,12 +46,16 @@ FLAG_COMB = 1 << 24
 class Widget:
     """One visible piece of a field on a page, as the file has it.
 
-    origin: index in the page's /Annots. value/checked are the FILE's; the
-    current state comes from FieldEdits (see current_value / is_on).
+    origin: index in the page's /Annots, None for a field created here.
+    value/checked are the FILE's; the current state comes from FieldEdits
+    (see current_value / is_on).
     on_state: for buttons, this widget's "on" appearance-state name.
+    changed: an existing widget whose rect or properties were edited; the
+        writer rewrites them and redraws its appearance.
+    uid: identity of a field created here.
     """
 
-    origin: int
+    origin: Optional[int]
     rect: Rect
     name: str
     kind: str              # one of FILLABLE, or "other" (push button, signature, list)
@@ -51,6 +64,8 @@ class Widget:
     on_state: str = ""
     options: Tuple[str, ...] = ()
     font_size: float = 0.0  # 0: auto
+    changed: bool = False
+    uid: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "rect", normalize_rect(tuple(float(v) for v in self.rect)))
@@ -70,6 +85,17 @@ class Widget:
     def short_name(self) -> str:
         return self.name.rsplit(".", 1)[-1] or "field"
 
+    @property
+    def ident(self):
+        return ("o", self.origin) if self.origin is not None else ("n", self.uid)
+
+    def moved_to(self, rect: Rect) -> "Widget":
+        return replace(self, rect=rect, changed=True)
+
+    def renamed(self, last: str) -> "Widget":
+        prefix = self.name.rsplit(".", 1)[0] + "." if "." in self.name else ""
+        return replace(self, name=prefix + last, changed=True)
+
 
 def auto_font_size(value: str, width: float, height: float, multiline: bool) -> float:
     """What a field with font size 0 ("auto") uses: fit the height, then
@@ -80,6 +106,62 @@ def auto_font_size(value: str, width: float, height: float, multiline: bool) -> 
     while size > 4.0 and text_width(value, size) > width - 4:
         size -= 0.5
     return size
+
+
+_uids = itertools.count(1)
+NEW_FIELD_SIZES = {TEXT: (150.0, 20.0), CHECKBOX: (12.0, 12.0), COMBO: (120.0, 20.0)}
+NEW_FIELD_PREFIX = {TEXT: "Text", CHECKBOX: "Check", COMBO: "Dropdown"}
+
+
+def new_field(kind: str, name: str, rect: Rect, multiline: bool = False,
+              options: Tuple[str, ...] = ()) -> Widget:
+    flags = FLAG_MULTILINE if multiline and kind == TEXT else 0
+    if kind == COMBO:
+        flags |= FLAG_COMBO
+    value = "Off" if kind == CHECKBOX else ""
+    return Widget(None, rect, name, kind, flags, value,
+                  on_state="Yes" if kind == CHECKBOX else "", options=tuple(options),
+                  font_size=0.0, uid=next(_uids))
+
+
+def unique_name(kind: str, taken) -> str:
+    """"Text 1", "Text 2"... -- the first not already a field name."""
+    n = 1
+    while f"{NEW_FIELD_PREFIX[kind]} {n}" in taken:
+        n += 1
+    return f"{NEW_FIELD_PREFIX[kind]} {n}"
+
+
+class FormEdits:
+    """Immutable PageKey -> tuple of Widget, for pages whose fields changed."""
+
+    __slots__ = ("_pages",)
+
+    def __init__(self, pages=None):
+        self._pages = dict(pages or {})
+
+    def get(self, key):
+        return self._pages.get(key)
+
+    def with_page(self, key, widgets) -> "FormEdits":
+        pages = dict(self._pages)
+        pages[key] = tuple(widgets)
+        return FormEdits(pages)
+
+    def items(self):
+        return self._pages.items()
+
+    def __bool__(self) -> bool:
+        return bool(self._pages)
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, FormEdits) and self._pages == other._pages
+
+    def __hash__(self) -> int:
+        return hash(frozenset(self._pages.items()))
+
+    def __repr__(self) -> str:
+        return f"FormEdits({self._pages!r})"
 
 
 class FieldEdits:
@@ -103,6 +185,14 @@ class FieldEdits:
 
     def items(self):
         return self._values.items()
+
+    def renamed(self, file: int, old: str, new: str) -> "FieldEdits":
+        """Carry a filled-in value over when its field is renamed."""
+        if (file, old) not in self._values:
+            return self
+        values = dict(self._values)
+        values[(file, new)] = values.pop((file, old))
+        return FieldEdits(values)
 
     def __bool__(self) -> bool:
         return bool(self._values)

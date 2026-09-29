@@ -88,7 +88,8 @@ class PageRenderer:
         # (small) set is part of the key rather than working out which.
         fields = doc.fields.for_file(doc.pages[index].file) if doc.fields else None
         return (index, int(round(scale * 1000)), rotation % 360, edits,
-                tuple(sorted(fields.items())) if fields else None)
+                tuple(sorted(fields.items())) if fields else None,
+                doc.forms.get(doc.page_key(index)))
 
     def _overlay(self, index: int) -> Optional[bytes]:
         """The page's edited annotations as a one-page PDF, or None if the
@@ -138,9 +139,9 @@ class PageRenderer:
 
 @functools.lru_cache(maxsize=32)
 def _cached_overlay(path, mtime_ns, size, password, page_index, edits, media, crop, rotate,
-                    drop_widgets, field_values, redraw_fields):
+                    drop_widgets, field_values, redraw_fields, form_state):
     """Shared by every renderer (page view, thumbnails), so one edit builds
     its overlay once. mtime and size are in the key so an overlay built from
     a file's old contents is never reused after that file is saved over."""
     return overlay_pdf(Path(path), password, page_index, edits, media, crop, rotate,
-                       drop_widgets, field_values, redraw_fields)
+                       drop_widgets, field_values, redraw_fields, form_state)

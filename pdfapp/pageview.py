@@ -50,7 +50,19 @@ from .annots import (
     text_box_size,
     without,
 )
-from .fields import CHECKBOX, COMBO, RADIO, TEXT, Widget, auto_font_size, current_value, is_on
+from .fields import (
+    CHECKBOX,
+    COMBO,
+    NEW_FIELD_SIZES,
+    RADIO,
+    TEXT,
+    Widget,
+    auto_font_size,
+    current_value,
+    is_on,
+    new_field,
+    unique_name,
+)
 from .textlayout import PADDING, encodable, layout
 from .document import PdfDocument
 from .rendering import PageRenderer
@@ -84,6 +96,11 @@ class Tool(Enum):
     ARROW = "arrow"
     PEN = "pen"
     STAMP = "stamp"
+    FORM = "form"               # edit fields: select, move, resize, delete, properties
+    FIELD_TEXT = "field_text"
+    FIELD_MULTILINE = "field_multiline"
+    FIELD_CHECKBOX = "field_checkbox"
+    FIELD_COMBO = "field_combo"
 
 
 # Tools that mark text: drag across it, a markup annotation lands on release.
@@ -93,6 +110,10 @@ TEXT_TOOLS = (Tool.TYPEWRITER, Tool.TEXTBOX)
 # Drag to draw. Shapes return to Select once drawn; the pen stays until Esc.
 DRAW_TOOLS = (Tool.RECT, Tool.ELLIPSE, Tool.LINE, Tool.ARROW, Tool.PEN)
 RESIZABLE_SHAPES = ("Square", "Circle")
+# Draw a field (drag, or click for a standard size); then Edit Fields.
+FIELD_TOOLS = {Tool.FIELD_TEXT: (TEXT, False), Tool.FIELD_MULTILINE: (TEXT, True),
+               Tool.FIELD_CHECKBOX: (CHECKBOX, False), Tool.FIELD_COMBO: (COMBO, False)}
+FORM_TOOLS = (Tool.FORM, *FIELD_TOOLS)
 
 _EDGE_CURSORS = {
     "l": Qt.SizeHorCursor, "r": Qt.SizeHorCursor, "t": Qt.SizeVerCursor, "b": Qt.SizeVerCursor,
@@ -296,6 +317,8 @@ class PdfView(QScrollArea):
     text_selection_changed = Signal(bool)      # whether any text is selected
     editing_changed = Signal(bool)             # a text box / field editor is open
     fields_edit = Signal(object, str, str)     # field key, new value, undo label
+    forms_edit = Signal(object, object, str)   # page key, new widget tuple, undo label
+    field_properties = Signal(int, object)     # page index, Widget (double-clicked)
     message = Signal(str)                      # something the user should know
 
     def __init__(self, parent=None):
@@ -319,6 +342,7 @@ class PdfView(QScrollArea):
         self.stamp = STAMPS[0]  # (label, colour, dated, /Name)
         self._editor = None     # open text box editor, see _open_editor
         self._field_editor = None  # open form field editor, see _open_field
+        self._selected_field = None  # (page key, widget ident) in Edit Fields
         self.author = getpass.getuser()  # /T on annotations created here
         self.setFocusPolicy(Qt.StrongFocus)  # Delete and Esc for annotations
 
@@ -353,12 +377,16 @@ class PdfView(QScrollArea):
             return
         self._tool = tool
         self._drag = None
+        if tool not in FORM_TOOLS:
+            self._selected_field = None
         for page in self._pages:
             page.setCursor(self._tool_cursor())
+            page.update()  # field outlines show only while preparing a form
         self.tool_changed.emit(tool)
 
     def _tool_cursor(self):
-        if self._tool is Tool.NOTE or self._tool in DRAW_TOOLS or self._tool is Tool.STAMP:
+        if self._tool is Tool.NOTE or self._tool in DRAW_TOOLS or self._tool is Tool.STAMP \
+                or self._tool in FIELD_TOOLS:
             return Qt.CrossCursor
         if self._tool in MARKUP_TOOLS or self._tool in TEXT_TOOLS:
             return Qt.IBeamCursor
@@ -495,6 +523,11 @@ class PdfView(QScrollArea):
         if self._tool is Tool.STAMP:
             self._place_stamp(page, pos)
             return True
+        if self._tool in FIELD_TOOLS:
+            self._drag = {"mode": "fdraw", "page": page, "press": pos, "end": None}
+            return True
+        if self._tool is Tool.FORM:
+            return self._form_press(page, pos)
         if self._tool in DRAW_TOOLS:
             self._drag = {"mode": "draw", "page": page, "press": pos, "end": None,
                           "shift": False, "points": [page.pdf_point_at(pos)]}
@@ -541,11 +574,17 @@ class PdfView(QScrollArea):
         if drag is not None and event.buttons() & Qt.LeftButton and drag["page"] is page:
             started = drag.get("delta") is not None or drag.get("anchor") is not None \
                 or drag.get("end") is not None or drag.get("rect") is not None
+            if drag["mode"] in ("fdraw", "fmove", "fresize") and drag.get("end") is not None:
+                started = True
             if not started and \
                     (pos - drag["press"]).manhattanLength() < QApplication.startDragDistance():
                 return True
             if drag["mode"] == "resize":
                 drag["rect"] = self._resized_rect(page, drag, pos)
+                page.update()
+                return True
+            if drag["mode"] in ("fdraw", "fmove", "fresize"):
+                drag["end"] = pos
                 page.update()
                 return True
             if drag["mode"] == "draw":
@@ -583,6 +622,12 @@ class PdfView(QScrollArea):
         return False
 
     def _hover(self, page: "PageWidget", pos: QPoint, event) -> None:
+        if self._tool is Tool.FORM:
+            widget = self._field_at(page, pos)
+            edges = self._edges_of(page, widget, pos) if widget is not None else ""
+            page.setCursor(_EDGE_CURSORS[edges] if edges else
+                           Qt.SizeAllCursor if widget is not None else Qt.ArrowCursor)
+            return
         if self._tool is not Tool.SELECT:
             return
         edge = self._resize_hit(page, pos)
@@ -610,6 +655,15 @@ class PdfView(QScrollArea):
         drag, self._drag = self._drag, None
         if drag is None or event.button() != Qt.LeftButton:
             return False
+        if drag["mode"] == "fdraw":
+            self._create_field(page, drag)
+            page.update()
+            return True
+        if drag["mode"] in ("fmove", "fresize"):
+            if drag["end"] is not None:
+                self._commit_field_geometry(page, drag)
+            page.update()
+            return True
         if drag["mode"] == "draw":
             drag["shift"] = bool(event.modifiers() & Qt.ShiftModifier)
             if drag["end"] is not None:
@@ -660,6 +714,12 @@ class PdfView(QScrollArea):
         return True
 
     def page_double_click(self, page: "PageWidget", event) -> bool:
+        if self._tool is Tool.FORM and self.document is not None:
+            found = self._field_at(page, event.position().toPoint())
+            if found is not None:
+                self.field_properties.emit(page.index, found)
+                return True
+            return False
         if self._tool is not Tool.SELECT or self.document is None:
             return False
         pos = event.position().toPoint()
@@ -850,14 +910,174 @@ class PdfView(QScrollArea):
 
     def _widget_at(self, page: "PageWidget", pos: QPoint, fillable_only: bool = True):
         doc = self.document
-        if doc is None or not doc.page_has_forms(page.index):
+        if doc is None:
             return None
         x, y = page.pdf_point_at(pos)
-        for widget in reversed(doc.page_widgets(page.index)):
+        for widget in reversed(doc.current_widgets(page.index)):
             if widget.contains(x, y) and widget.kind in (TEXT, CHECKBOX, RADIO, COMBO):
                 if widget.fillable or not fillable_only:
                     return widget
         return None
+
+    # -- preparing a form: fields drawn, moved, resized, deleted
+
+    def _field_at(self, page: "PageWidget", pos: QPoint) -> Optional[Widget]:
+        x, y = page.pdf_point_at(pos)
+        grip = 3.0 / max(page.widget_transform().scale, 1e-6)
+        for widget in reversed(self.document.current_widgets(page.index)):
+            x0, y0, x1, y1 = widget.rect
+            if x0 - grip <= x <= x1 + grip and y0 - grip <= y <= y1 + grip:
+                return widget
+        return None
+
+    def selected_field(self):
+        """(page index, Widget) of the field selected in Edit Fields, or None."""
+        if self._selected_field is None or self.document is None:
+            return None
+        key, ident = self._selected_field
+        for page in self._pages:
+            if self.document.page_key(page.index) == key:
+                for widget in self.document.current_widgets(page.index):
+                    if widget.ident == ident:
+                        return page.index, widget
+        return None
+
+    def select_field(self, index: int, ident) -> None:
+        self._selected_field = (self.document.page_key(index), ident) if ident is not None else None
+        for page in self._pages:
+            page.update()
+
+    def _edges_of(self, page: "PageWidget", widget: Widget, pos: QPoint) -> str:
+        grip = 5
+        left, top, right, bottom = page.widget_transform().pdf_rect_to_widget(widget.rect)
+        x, y = pos.x(), pos.y()
+        if not (left - grip <= x <= right + grip and top - grip <= y <= bottom + grip):
+            return ""
+        edges = ""
+        if abs(x - left) <= grip:
+            edges += "l"
+        elif abs(x - right) <= grip:
+            edges += "r"
+        if abs(y - top) <= grip:
+            edges += "t"
+        elif abs(y - bottom) <= grip:
+            edges += "b"
+        return edges
+
+    def _form_press(self, page: "PageWidget", pos: QPoint) -> bool:
+        widget = self._field_at(page, pos)
+        self.select_field(page.index, widget.ident if widget else None)
+        if widget is None:
+            return True
+        edges = self._edges_of(page, widget, pos)
+        start = page.widget_transform().pdf_rect_to_widget(widget.rect)
+        self._drag = {"mode": "fresize" if edges else "fmove", "page": page, "widget": widget,
+                      "edges": edges, "press": pos, "start": start, "end": None}
+        return True
+
+    def _dragged_field_rect(self, page: "PageWidget", drag):
+        """The field's new rect in widget px while moving / resizing."""
+        left, top, right, bottom = drag["start"]
+        dx = drag["end"].x() - drag["press"].x()
+        dy = drag["end"].y() - drag["press"].y()
+        if drag["mode"] == "fmove":
+            return left + dx, top + dy, right + dx, bottom + dy
+        edges = drag["edges"]
+        if "l" in edges:
+            left = min(left + dx, right - 6)
+        if "r" in edges:
+            right = max(right + dx, left + 6)
+        if "t" in edges:
+            top = min(top + dy, bottom - 6)
+        if "b" in edges:
+            bottom = max(bottom + dy, top + 6)
+        return left, top, right, bottom
+
+    def _commit_field_geometry(self, page: "PageWidget", drag) -> None:
+        doc = self.document
+        rect = page.widget_transform().widget_rect_to_pdf(self._dragged_field_rect(page, drag))
+        old = drag["widget"]
+        widgets = tuple(w.moved_to(rect) if w.ident == old.ident else w
+                        for w in doc.current_widgets(page.index))
+        verb = "Move" if drag["mode"] == "fmove" else "Resize"
+        self.forms_edit.emit(doc.page_key(page.index), widgets, f"{verb} {old.short_name()}")
+
+    def taken_field_names(self, file: int) -> set:
+        doc = self.document
+        return {w.name for i in range(doc.page_count) if doc.pages[i].file == file
+                for w in doc.current_widgets(i)}
+
+    def _create_field(self, page: "PageWidget", drag) -> None:
+        doc = self.document
+        kind, multiline = FIELD_TOOLS[self._tool]
+        t = page.widget_transform()
+        a, b = drag["press"], drag["end"]
+        if b is not None and abs(b.x() - a.x()) >= 6 and abs(b.y() - a.y()) >= 6:
+            rect = t.widget_rect_to_pdf((min(a.x(), b.x()), min(a.y(), b.y()),
+                                         max(a.x(), b.x()), max(a.y(), b.y())))
+        else:
+            # A click: standard size, top-left at the click.
+            w, h = NEW_FIELD_SIZES[kind]
+            if multiline:
+                h = 60.0
+            x, y = page.pdf_point_at(a)
+            rect = (x, y - h, x + w, y)
+        name = unique_name(kind, self.taken_field_names(doc.pages[page.index].file))
+        options = ("Option 1", "Option 2", "Option 3") if kind == COMBO else ()
+        field = new_field(kind, name, rect, multiline, options)
+        self.forms_edit.emit(doc.page_key(page.index), doc.current_widgets(page.index) + (field,),
+                             f"Add {name}")
+        self.set_tool(Tool.FORM)
+        self.select_field(page.index, field.ident)
+        if kind == COMBO:
+            self.field_properties.emit(page.index, field)  # a dropdown needs its options
+
+    def delete_selected_field(self) -> bool:
+        if self._tool is not Tool.FORM:
+            return False
+        found = self.selected_field()
+        if found is None:
+            return False
+        index, gone = found
+        doc = self.document
+        self._selected_field = None
+        self.forms_edit.emit(doc.page_key(index),
+                             tuple(w for w in doc.current_widgets(index) if w.ident != gone.ident),
+                             f"Delete {gone.short_name()}")
+        return True
+
+    def _paint_fields(self, page: "PageWidget", painter: QPainter) -> None:
+        """Preparing a form: every field outlined and named, the selected
+        one solid, the one being dragged or drawn previewed. Chrome only."""
+        doc = self.document
+        selected = self.selected_field()
+        drag = self._drag
+        small = QFont("Arial")
+        small.setPixelSize(10)
+        painter.setFont(small)
+        for widget in doc.current_widgets(page.index):
+            box = self._widget_rect(page, widget.rect)
+            is_selected = selected is not None and selected[0] == page.index \
+                and selected[1].ident == widget.ident
+            painter.setPen(QPen(QColor(40, 110, 230) if is_selected else QColor(120, 120, 140),
+                                2 if is_selected else 1, Qt.SolidLine if is_selected else Qt.DashLine))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(box)
+            painter.setPen(QColor(40, 110, 230) if is_selected else QColor(90, 90, 110))
+            painter.drawText(QPointF(box.left() + 2, box.top() - 3), widget.short_name())
+        if drag is not None and drag["page"] is page and drag.get("end") is not None:
+            if drag["mode"] in ("fmove", "fresize"):
+                left, top, right, bottom = self._dragged_field_rect(page, drag)
+                box = QRectF(left, top, right - left, bottom - top)
+            elif drag["mode"] == "fdraw":
+                a, b = drag["press"], drag["end"]
+                box = QRectF(QPointF(min(a.x(), b.x()), min(a.y(), b.y())),
+                             QPointF(max(a.x(), b.x()), max(a.y(), b.y())))
+            else:
+                return
+            painter.fillRect(box, QColor(40, 110, 230, 40))
+            painter.setPen(QPen(QColor(40, 110, 230), 1.5, Qt.DashLine))
+            painter.drawRect(box)
 
     def _field_key(self, index: int, widget: Widget):
         return (self.document.pages[index].file, widget.name)
@@ -928,7 +1148,7 @@ class PdfView(QScrollArea):
         # Tab / Shift+Tab: the next or previous fillable text field, in
         # page order and then the order the form lists them.
         order = [(p.index, w) for p in self._pages
-                 for w in self.document.page_widgets(p.index) if w.kind == TEXT and w.fillable]
+                 for w in self.document.current_widgets(p.index) if w.kind == TEXT and w.fillable]
         here = next((n for n, (i, w) in enumerate(order)
                      if i == page.index and w.origin == widget.origin), None)
         if here is None or not order:
@@ -1075,7 +1295,8 @@ class PdfView(QScrollArea):
         return True
 
     def keyPressEvent(self, event) -> None:
-        if event.key() in (Qt.Key_Delete, Qt.Key_Backspace) and self.delete_selected_annot():
+        if event.key() in (Qt.Key_Delete, Qt.Key_Backspace) and (
+                self.delete_selected_field() or self.delete_selected_annot()):
             return
         if event.key() == Qt.Key_Escape:
             self._drag = None
@@ -1090,6 +1311,8 @@ class PdfView(QScrollArea):
         """Text selection, and the selected annotation's outline and drag
         preview. UI chrome only -- annotations are always drawn by pdfium."""
         drag = self._drag
+        if self._tool in FORM_TOOLS:
+            self._paint_fields(page, painter)
         if drag is not None and drag["mode"] == "draw" and drag["page"] is page \
                 and drag["end"] is not None:
             self._paint_drawing(page, painter, drag)
