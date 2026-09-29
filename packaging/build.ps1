@@ -94,7 +94,9 @@ if (-not $iscc) {
     exit 1
 }
 
-& $iscc packaging\installer.iss
+$version = & $venvPython -c "import pdfapp; print(pdfapp.__version__)"
+Write-Host "Version $version"
+& $iscc "/DAppVersion=$version" packaging\installer.iss
 if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed." }
 
 $setup = Get-ChildItem packaging\out\*.exe | Select-Object -First 1

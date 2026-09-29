@@ -1,16 +1,20 @@
 ; Inno Setup script for ButterPDF.
 ;
 ; Build:  iscc packaging\installer.iss
-; Output: packaging\out\ButterPDF-Setup-0.1.0.exe
+; Output: packaging\out\ButterPDF-Setup-<version>.exe
 ;
 ; Interactive:  double-click, Next, Install, done.
 ; Silent (GPO or any deployment tool):
-;     ButterPDF-Setup-0.1.0.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+;     ButterPDF-Setup-<version>.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 ; Silent uninstall:
 ;     "%ProgramFiles%\ButterPDF\unins000.exe" /VERYSILENT /NORESTART
 
 #define AppName "ButterPDF"
-#define AppVersion "0.1.0"
+; build.ps1 passes /DAppVersion=<pdfapp.__version__>; this is only the
+; fallback for compiling by hand.
+#ifndef AppVersion
+  #define AppVersion "0.0.0-dev"
+#endif
 #define AppPublisher "ButterPDF"
 #define AppExeName "ButterPDF.exe"
 

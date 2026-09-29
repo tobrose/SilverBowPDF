@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "butterpdf"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Desktop PDF viewer and editor"
 requires-python = ">=3.11"
 dependencies = [
@@ -22,6 +22,9 @@ butterpdf = "pdfapp.__main__:main"
 
 [tool.setuptools]
 packages = ["pdfapp"]
+
+[tool.setuptools.dynamic]
+version = {attr = "pdfapp.__version__"}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

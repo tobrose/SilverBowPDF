@@ -12,7 +12,8 @@ winget install JRSoftware.InnoSetup
 .\packaging\build.ps1
 ```
 
-Output: `packaging\out\ButterPDF-Setup-0.1.0.exe`. Double-click, Next,
+Output: `packaging\out\ButterPDF-Setup-<version>.exe`, the version
+taken from `pdfapp/__init__.py`. Double-click, Next,
 Install. For deployment tooling: `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`.
 
 ## Why these tools

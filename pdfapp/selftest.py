@@ -38,7 +38,8 @@ def run(log_path: Optional[str] = None) -> int:
             lines.append(f"FAIL  {name}\n" + "".join(
                 "      " + l for l in traceback.format_exc().splitlines(True)))
 
-    lines.append(f"ButterPDF self-test  {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    from pdfapp import __version__
+    lines.append(f"ButterPDF {__version__} self-test  {time.strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append(f"python {platform.python_version()}  frozen={getattr(sys, 'frozen', False)}  "
                  f"{platform.platform()}  exe={sys.executable}")
 
