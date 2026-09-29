@@ -119,9 +119,18 @@ def run(log_path: Optional[str] = None) -> int:
         with PdfDocument(work / "locked.pdf", password="pw") as doc:
             return f"password prompt path works, {doc.page_count} pages"
 
+    def icon() -> str:
+        from PySide6.QtGui import QIcon
+        from pdfapp import ICON_FILE
+        sizes = QIcon(ICON_FILE).availableSizes()
+        if not sizes:
+            raise RuntimeError(f"window icon missing or unreadable: {ICON_FILE}")
+        return f"{sizes[0].width()}px"
+
     step("import libraries", imports)
     if not failures:
         step("start Qt", qt)
+        step("window icon", icon)
         step("create test PDFs (pikepdf)", make_pdfs)
         step("render a page (pdfium -> QImage)", render)
         step("edit, merge, save, reopen", edit_and_save)

@@ -23,6 +23,9 @@ silverbowpdf = "pdfapp.__main__:main"
 [tool.setuptools]
 packages = ["pdfapp"]
 
+[tool.setuptools.package-data]
+pdfapp = ["icon.png"]
+
 [tool.setuptools.dynamic]
 version = {attr = "pdfapp.__version__"}
 

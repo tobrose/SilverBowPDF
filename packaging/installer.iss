@@ -37,6 +37,7 @@ OutputBaseFilename={#AppName}-Setup-{#AppVersion}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=icon.ico
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 
@@ -81,8 +82,12 @@ Source: "..\dist\SilverbowPDF\*"; DestDir: "{app}"; \
     Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"
-Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
+; AppUserModelID must match the one the app sets (pdfapp/__main__.py), or a
+; pinned shortcut and the running window show up as two taskbar buttons.
+Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"; \
+    AppUserModelID: "SilverbowPDF.SilverbowPDF"
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; \
+    AppUserModelID: "SilverbowPDF.SilverbowPDF"; Tasks: desktopicon
 
 [Registry]
 ; Always register the app as a *capable* PDF handler, so it shows up under

@@ -50,7 +50,11 @@ pdfapp/
   thumbnails.py  Page sidebar: multi-select, drag-to-reorder, lazy thumbnails.
                  Emits requests only; MainWindow makes the PageList edit.
   mainwindow.py  Menus, toolbar, status bar, drag-and-drop.
-packaging/       PyInstaller spec, Inno Setup script, build script.
+packaging/       PyInstaller spec, Inno Setup script, build script. icon.ico is made
+                 from icon-source.png by scripts/make_icon.py (also writes
+                 pdfapp/icon.png, the runtime window icon); both committed.
+                 The AppUserModelID is set in __main__.py AND on the installer's
+                 shortcuts -- change one, change both, or pinning splits.
 ```
 
 Dependency direction is one-way: `transform` <- `pagelist` <- `document` <-

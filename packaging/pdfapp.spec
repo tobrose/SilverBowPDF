@@ -31,6 +31,11 @@ datas += collect_data_files("pypdfium2", includes=["version.json"])
 datas += collect_data_files("pypdfium2_raw", includes=["version.json"])
 binaries += collect_dynamic_libs("pypdfium2_raw")
 
+# --- our own -----------------------------------------------------------------
+# Window/taskbar icon, read at runtime from beside pdfapp/__init__ (see
+# pdfapp.ICON_FILE). The exe's own icon is packaging/icon.ico, below.
+datas += [(str(PROJECT_ROOT / "pdfapp" / "icon.png"), "pdfapp")]
+
 # --- pikepdf ---------------------------------------------------------------
 # Native _core extension plus the qpdf runtime it links against.
 binaries += collect_dynamic_libs("pikepdf")
