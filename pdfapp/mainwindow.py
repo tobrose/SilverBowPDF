@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QToolBar,
     QToolButton,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -44,6 +45,7 @@ from .annots import (
     new_note,
 )
 from .document import DocumentError, PasswordRequired, PdfDocument, SourceInfo
+from .findbar import FindBar
 from .pagelist import History, PageList
 from .fields import (
     COMBO,
@@ -86,7 +88,14 @@ class MainWindow(QMainWindow):
         self._keep_history = False
 
         self.view = PdfView(self)
-        self.setCentralWidget(self.view)
+        self.find_bar = FindBar(self.view, self)
+        central = QWidget(self)
+        column = QVBoxLayout(central)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(0)
+        column.addWidget(self.find_bar)
+        column.addWidget(self.view, 1)
+        self.setCentralWidget(central)
         self.view.setContextMenuPolicy(Qt.CustomContextMenu)
         self.view.customContextMenuRequested.connect(self._page_context_menu)
         self.view.annots_edit.connect(self._on_annots_edit)
@@ -188,6 +197,10 @@ class MainWindow(QMainWindow):
         self.act_tool_select = QAction("Select", self, shortcut=QKeySequence("V"),
                                        checkable=True, checked=True,
                                        triggered=lambda: self.view.set_tool(Tool.SELECT))
+        # No letter for Pan: H is Highlight. Middle-drag pans in any tool.
+        self.act_tool_pan = QAction("Pan", self, checkable=True,
+                                    toolTip="Pan: drag the page to scroll (Esc to stop)",
+                                    triggered=lambda: self.view.set_tool(Tool.PAN))
         self.act_tool_note = QAction("Note", self, shortcut=QKeySequence("N"), checkable=True,
                                      triggered=lambda: self.view.set_tool(Tool.NOTE))
         self.act_tool_highlight = QAction("Highlight", self, shortcut=QKeySequence("H"),
@@ -224,7 +237,8 @@ class MainWindow(QMainWindow):
         self.act_field_checkbox = tool("Checkbox", None, Tool.FIELD_CHECKBOX)
         self.act_field_combo = tool("Dropdown", None, Tool.FIELD_COMBO)
         self.tool_actions = {
-            Tool.SELECT: self.act_tool_select, Tool.NOTE: self.act_tool_note,
+            Tool.SELECT: self.act_tool_select, Tool.PAN: self.act_tool_pan,
+            Tool.NOTE: self.act_tool_note,
             Tool.HIGHLIGHT: self.act_tool_highlight, Tool.UNDERLINE: self.act_tool_underline,
             Tool.STRIKEOUT: self.act_tool_strikeout, Tool.TYPEWRITER: self.act_tool_typewriter,
             Tool.TEXTBOX: self.act_tool_textbox, Tool.RECT: self.act_tool_rect,
@@ -317,6 +331,12 @@ class MainWindow(QMainWindow):
         self.act_copy.setEnabled(False)
         self.act_select_all = QAction("Select &All", self, shortcut=QKeySequence.SelectAll,
                                       triggered=self.select_all)
+        self.act_find = QAction("&Find…", self, shortcut=QKeySequence.Find,
+                                triggered=self.find_bar.open)
+        self.act_find_next = QAction("Find &Next", self, shortcut=QKeySequence("F3"),
+                                     triggered=self.find_bar.find_next)
+        self.act_find_prev = QAction("Find Pre&vious", self, shortcut=QKeySequence("Shift+F3"),
+                                     triggered=self.find_bar.find_previous)
         self.act_delete_annot = QAction("Delete Annotation", self,
                                         triggered=self.view.delete_selected_annot)
 
@@ -374,6 +394,7 @@ class MainWindow(QMainWindow):
         tools.setMovable(False)
         self.addToolBar(tools)
         tools.addAction(self.act_tool_select)
+        tools.addAction(self.act_tool_pan)
         # Two drop-down buttons hold everything else (user's layout). Their
         # labels stay put -- "Annotate", "Form" -- and name the active tool
         # while one of theirs is in use (see _on_tool_changed).
@@ -406,10 +427,15 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(self.act_copy)
         edit_menu.addAction(self.act_select_all)
         edit_menu.addSeparator()
+        edit_menu.addAction(self.act_find)
+        edit_menu.addAction(self.act_find_next)
+        edit_menu.addAction(self.act_find_prev)
+        edit_menu.addSeparator()
         edit_menu.addAction(self.act_delete_annot)
 
         tools_menu = self.menuBar().addMenu("&Tools")
         tools_menu.addAction(self.act_tool_select)
+        tools_menu.addAction(self.act_tool_pan)
         tools_menu.addMenu(self.annotate_menu)
         tools_menu.addMenu(self.form_menu)
         tools_menu.addSeparator()
@@ -460,6 +486,7 @@ class MainWindow(QMainWindow):
                     self.act_page_rot_cw, self.act_page_up, self.act_page_down,
                     self.act_page_delete, self.act_page_extract, self.act_page_insert,
                     *self.tool_actions.values(), self.act_delete_annot, self.act_select_all,
+                    self.act_find, self.act_find_next, self.act_find_prev,
                     self.act_next,
                     self.act_prev, self.act_first,
                     self.act_last, self.act_goto):

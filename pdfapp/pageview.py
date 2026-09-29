@@ -84,6 +84,7 @@ class FitMode(Enum):
 
 class Tool(Enum):
     SELECT = "select"
+    PAN = "pan"                 # drag to scroll; sticky until Esc
     NOTE = "note"
     HIGHLIGHT = "highlight"
     UNDERLINE = "underline"
@@ -320,6 +321,7 @@ class PdfView(QScrollArea):
     forms_edit = Signal(object, object, str)   # page key, new widget tuple, undo label
     field_properties = Signal(int, object)     # page index, Widget (double-clicked)
     message = Signal(str)                      # something the user should know
+    pages_rebuilt = Signal()                   # displayed indices may now mean other pages
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -334,6 +336,9 @@ class PdfView(QScrollArea):
         self._selected = None   # (page key, annot ident) or None
         self._drag = None       # in-progress mouse drag, see page_mouse_press
         self._text_sel = None   # (page index, anchor char, focus char)
+        self._search_hits = {}  # page index -> [(start, end, rects)], see set_search_hits
+        self._search_current = None  # (page index, start) of the current match
+        self._pan = None        # (last global pos, mouse button) while panning
         self.highlight_color = HIGHLIGHT_COLORS["Yellow"]
         self.text_size = 12.0
         self.text_color = TEXT_COLORS["Black"]
@@ -382,9 +387,13 @@ class PdfView(QScrollArea):
         for page in self._pages:
             page.setCursor(self._tool_cursor())
             page.update()  # field outlines show only while preparing a form
+        # The gaps between pages pan too, so they wear the hand as well.
+        self._container.setCursor(Qt.OpenHandCursor if tool is Tool.PAN else Qt.ArrowCursor)
         self.tool_changed.emit(tool)
 
     def _tool_cursor(self):
+        if self._tool is Tool.PAN:
+            return Qt.OpenHandCursor
         if self._tool is Tool.NOTE or self._tool in DRAW_TOOLS or self._tool is Tool.STAMP \
                 or self._tool in FIELD_TOOLS:
             return Qt.CrossCursor
@@ -450,6 +459,47 @@ class PdfView(QScrollArea):
             if 0 <= i < len(self._pages):
                 self._pages[i].update()
 
+    # -- search matches (found by findbar.FindBar; drawn here as chrome).
+    # Repaint only the pages whose matches changed: on a remote desktop every repaint
+    # is re-encoded and sent.
+
+    def set_search_hits(self, index: int, hits) -> None:
+        """Matches on one page: [(start, end, rects)], as find_text gives."""
+        if hits:
+            self._search_hits[index] = hits
+        elif self._search_hits.pop(index, None) is None:
+            return
+        self._update_pages({index})
+
+    def set_search_current(self, current) -> None:
+        """(page index, start char) of the match to emphasise, or None."""
+        old, self._search_current = self._search_current, current
+        if old != current:
+            self._update_pages({c[0] for c in (old, current) if c is not None})
+
+    def clear_search(self) -> None:
+        pages = set(self._search_hits) | ({self._search_current[0]} if self._search_current else set())
+        self._search_hits = {}
+        self._search_current = None
+        self._update_pages(pages)
+
+    def reveal(self, index: int, rects) -> None:
+        """Scroll so these PDF-space rects on a page are in view, if they
+        aren't already -- a third of the way down, where the eye goes."""
+        if not 0 <= index < len(self._pages) or not rects:
+            return
+        page = self._pages[index]
+        box = QRectF()
+        for rect in rects:
+            box = box.united(self._widget_rect(page, rect))
+        box.translate(QPointF(page.pos()))
+        hbar, vbar = self.horizontalScrollBar(), self.verticalScrollBar()
+        width, height = self.viewport().width(), self.viewport().height()
+        if box.top() < vbar.value() or box.bottom() > vbar.value() + height:
+            vbar.setValue(int(box.center().y() - height / 3))
+        if box.left() < hbar.value() or box.right() > hbar.value() + width:
+            hbar.setValue(int(box.center().x() - width / 2))
+
     # -- annotation selection
 
     def select_annot(self, index: int, ident) -> None:
@@ -501,7 +551,50 @@ class PdfView(QScrollArea):
     #                          passes the threshold, so a plain click selects
     #                          nothing (and, on a highlight, keeps it selected)
 
+    # -- panning: the Pan tool's left drag, or a middle drag in any tool.
+    # The gaps between pages pan as well (the mouse*Event overrides below).
+
+    def _pan_press(self, event) -> bool:
+        button = event.button()
+        if self.document is None or self._pan is not None or not (
+                button == Qt.MiddleButton or (button == Qt.LeftButton and self._tool is Tool.PAN)):
+            return False
+        self._pan = (event.globalPosition().toPoint(), button)
+        QApplication.setOverrideCursor(Qt.ClosedHandCursor)
+        return True
+
+    def _pan_move(self, event) -> bool:
+        if self._pan is None:
+            return False
+        pos = event.globalPosition().toPoint()
+        delta = pos - self._pan[0]
+        self._pan = (pos, self._pan[1])
+        self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
+        self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
+        return True
+
+    def _pan_release(self, event) -> bool:
+        if self._pan is None or event.button() != self._pan[1]:
+            return False
+        self._pan = None
+        QApplication.restoreOverrideCursor()
+        return True
+
+    def mousePressEvent(self, event) -> None:
+        if not self._pan_press(event):
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if not self._pan_move(event):
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if not self._pan_release(event):
+            super().mouseReleaseEvent(event)
+
     def page_mouse_press(self, page: "PageWidget", event) -> bool:
+        if self._pan_press(event):
+            return True
         if event.button() != Qt.LeftButton or self.document is None:
             return False
         if self._editor is not None:
@@ -567,6 +660,8 @@ class PdfView(QScrollArea):
         return True
 
     def page_mouse_move(self, page: "PageWidget", event) -> bool:
+        if self._pan_move(event):
+            return True
         if self.document is None:
             return False
         pos = event.position().toPoint()
@@ -652,6 +747,8 @@ class PdfView(QScrollArea):
             QToolTip.hideText()
 
     def page_mouse_release(self, page: "PageWidget", event) -> bool:
+        if self._pan_release(event):
+            return True
         drag, self._drag = self._drag, None
         if drag is None or event.button() != Qt.LeftButton:
             return False
@@ -1337,6 +1434,16 @@ class PdfView(QScrollArea):
             _, start, end = self._text_sel
             for rect in self.document.text_rects(page.index, start, end):
                 painter.fillRect(self._widget_rect(page, rect), QColor(0, 120, 215, 70))
+        for start, _, rects in self._search_hits.get(page.index, ()):
+            current = self._search_current == (page.index, start)
+            for rect in rects:
+                box = self._widget_rect(page, rect)
+                painter.fillRect(box, QColor(255, 140, 0, 140) if current
+                                 else QColor(255, 210, 0, 90))
+                if current:
+                    painter.setPen(QPen(QColor(220, 100, 0), 1.5))
+                    painter.setBrush(Qt.NoBrush)
+                    painter.drawRect(box.adjusted(-1, -1, 1, 1))
 
         found = self.selected_annot()
         if found is None or found[0] != page.index:
@@ -1373,6 +1480,9 @@ class PdfView(QScrollArea):
         self.document = document
         self._selected = None
         self._drag = None
+        if self._pan is not None:  # e.g. a middle-drag when a file was dropped
+            self._pan = None
+            QApplication.restoreOverrideCursor()
         if self._text_sel is not None:
             self._text_sel = None
             self.text_selection_changed.emit(False)
@@ -1421,20 +1531,26 @@ class PdfView(QScrollArea):
                 widget.setParent(None)
                 widget.deleteLater()
         self._pages = []
+        # Matches are by displayed index; after a rebuild that may be another page.
+        self._search_hits = {}
+        self._search_current = None
 
         if self.document is None:
             self._placeholder = QLabel("Open a PDF to get started  \u2014  Ctrl+O, or drop a file here")
             self._placeholder.setAlignment(Qt.AlignCenter)
             self._placeholder.setStyleSheet("color: #cfcfd4; font-size: 15px; padding: 60px;")
             self._layout.addWidget(self._placeholder)
+            self.pages_rebuilt.emit()
             return
 
         for i in range(self.document.page_count):
             page = PageWidget(self.document, self.renderer, i, self._container, view=self)
             page.apply_view_state(self._scale, self._rotation)
+            page.setCursor(self._tool_cursor())
             self._layout.addWidget(page, 0, Qt.AlignHCenter)
             self._pages.append(page)
         self._layout.addStretch(1)
+        self.pages_rebuilt.emit()
 
     # ---- zoom ----------------------------------------------------------
 

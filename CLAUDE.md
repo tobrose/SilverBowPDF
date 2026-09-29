@@ -44,6 +44,9 @@ pdfapp/
   rendering.py   pdfium bitmap -> QImage, plus an LRU page cache.
   pageview.py    Continuous scroll view, zoom, view rotation, tools, annotation
                  select/move/delete. Emits edit requests; never edits.
+  findbar.py     Ctrl+F bar. Scans pages in 30ms timer slices from the current
+                 page (find_text: pdfium search, throwaway text pages so a long
+                 document isn't pinned in memory); the view paints the matches.
   thumbnails.py  Page sidebar: multi-select, drag-to-reorder, lazy thumbnails.
                  Emits requests only; MainWindow makes the PageList edit.
   mainwindow.py  Menus, toolbar, status bar, drag-and-drop.
@@ -51,7 +54,7 @@ packaging/       PyInstaller spec, Inno Setup script, build script.
 ```
 
 Dependency direction is one-way: `transform` <- `pagelist` <- `document` <-
-`rendering` <- `pageview`/`thumbnails` <- `mainwindow`, with `writer` depending only on
+`rendering` <- `pageview`/`thumbnails` <- `findbar` <- `mainwindow`, with `writer` depending only on
 `pagelist` and used only by `mainwindow`. Nothing lower imports anything higher.
 
 Page edits never mutate anything until save: pdfium keeps rendering the
@@ -213,7 +216,13 @@ and ZaDb. New fields are fillable before saving (current_widgets).
 Radio-button creation is not built (filling radios is). Clicking empty page
 in Edit Fields returns to Select (user's rule, as everywhere).
 
-Toolbar / Tools menu layout (user's): Select, Annotate (drop-down: note,
+Find (Ctrl+F; F3 / Shift+F3, Enter / Shift+Enter): bar above the view,
+match case / whole words, "3 of 17", all matches tinted, current one
+orange and scrolled into view. Page edits rescan quietly (no jump).
+Pan tool (hand, sticky until Esc; no letter -- H is Highlight) and
+middle-drag pans in every tool, gaps between pages included.
+
+Toolbar / Tools menu layout (user's): Select, Pan, Annotate (drop-down: note,
 text markup, typewriter/text box, shapes/pen, stamps, style menus), Form
 (drop-down: Edit Fields + field tools). The buttons keep their labels and
 name the active tool ("Annotate: Rectangle").
@@ -242,6 +251,8 @@ count on per-user settings surviving logoff.
   (annotpdf.overlay_args is the single rule; tests use it too).
 - XFA (LiveCycle) forms: pdfium can't show their fields; the status bar
   says so. Converting XFA isn't planned.
+- Find doesn't match a phrase broken across two lines (pdfium's text has a
+  line break there), and finds nothing on scanned pages until OCR exists.
 
 - Save resets undo history. The saved file becomes the new source, and old
   PageList snapshots index into the previous file.

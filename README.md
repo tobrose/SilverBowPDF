@@ -57,6 +57,8 @@ on a headless box.
 | Double-click an annotation | Edit its comment |
 | `PgUp` `PgDn` `Ctrl+Home` `Ctrl+End` `Ctrl+G` | Navigation |
 | `Ctrl` + scroll | Zoom at cursor |
+| `Ctrl+F` | Find text; `Enter` / `F3` next, `Shift+Enter` / `Shift+F3` previous, `Esc` closes |
+| Pan button, or drag with the middle mouse button | Drag the page to scroll; `Esc` back to Select |
 
 Drag a PDF onto the window to open it.
 

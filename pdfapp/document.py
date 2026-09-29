@@ -388,6 +388,50 @@ class PdfDocument:
         count = textpage.count_rects(start, end - start + 1)
         return [textpage.get_rect(i) for i in range(count)]
 
+    def find_text(self, index: int, query: str, match_case: bool = False,
+                  whole_word: bool = False) -> List[Tuple[int, int, list]]:
+        """Every occurrence of `query` on a page, in order: (start, end,
+        rects), the range inclusive and the rects as text_rects gives them.
+
+        pdfium's own search, so the ranges are the same char indices as text
+        selection. A page whose text isn't cached already gets a throwaway
+        text page: searching a long document must not pin every page's
+        text (and char boxes) in memory for the rest of the session.
+        """
+        if not query:
+            return []
+        if self._closed:
+            raise DocumentError("document is closed")
+        ref = self._pages[index]
+        source = self._sources[ref.file]
+        cached = source.text_cache.get(ref.source)
+        page = textpage = None
+        own_page = False
+        if cached is not None:
+            textpage = cached.textpage
+        else:
+            page = source.page_cache.get(ref.source)
+            if page is None:
+                page, own_page = source.pdf[ref.source], True
+            textpage = page.get_textpage()
+        try:
+            hits = []
+            searcher = textpage.search(query, match_case=match_case, match_whole_word=whole_word)
+            try:
+                while (found := searcher.get_next()) is not None:
+                    start, count = found
+                    rects = [textpage.get_rect(i)
+                             for i in range(textpage.count_rects(start, count))]
+                    hits.append((start, start + count - 1, rects))
+            finally:
+                searcher.close()
+            return hits
+        finally:
+            if cached is None:
+                textpage.close()
+                if own_page:
+                    page.close()
+
     def page_geometry(self, index: int):
         """(MediaBox, CropBox, intrinsic /Rotate) with inheritance resolved."""
         page = self._page(index)
