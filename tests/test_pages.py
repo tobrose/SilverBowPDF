@@ -20,6 +20,7 @@ import pikepdf  # noqa: E402
 
 from pdfapp.document import PdfDocument, SourceInfo  # noqa: E402
 from pdfapp.pagelist import History, PageList, PageRef  # noqa: E402
+from pdfapp.security import REMOVE  # noqa: E402
 from pdfapp.writer import EncryptionWouldBeLost, SaveError, commit, write_pdf  # noqa: E402
 
 # (width, height, intrinsic /Rotate, cropbox or None). Every page a different
@@ -453,27 +454,54 @@ def test_inserting_from_protected_file_needs_consent():
                 raise AssertionError("protected pages saved without consent")
             assert not out.exists()
             commit(write_pdf(doc.sources, edits, out, allow_decrypt={f}), out)
+            # If the result is protected anyway, nothing is being lost: no ask.
+            protected = Path(tmp, "protected.pdf")
+            commit(write_pdf(doc.sources, edits, protected, protection="new"), protected)
         with pikepdf.open(out) as pdf:
             assert len(pdf.pages) == len(PAGES) + 1 and not pdf.is_encrypted
+        with pikepdf.open(protected, password="new") as pdf:
+            assert len(pdf.pages) == len(PAGES) + 1 and pdf.is_encrypted
 
 
-def test_encrypted_source_is_not_silently_decrypted():
+def test_encrypted_document_keeps_its_protection():
+    """Rule 5: saving never strips protection unless removing it was asked
+    for. The default keeps it exactly -- passwords and restrictions -- even
+    when the file was opened with the user password, not the owner's."""
     with tempfile.TemporaryDirectory() as tmp:
-        src, out = Path(tmp, "enc.pdf"), Path(tmp, "out.pdf")
-        _make_pdf(src, encryption=pikepdf.Encryption(user="u", owner="o"))
+        src = Path(tmp, "enc.pdf")
+        no_copy = pikepdf.Permissions(extract=False)
+        _make_pdf(src, encryption=pikepdf.Encryption(user="u", owner="o", allow=no_copy))
         edits = PageList.identity(len(PAGES)).deleted([0])
+
+        kept = Path(tmp, "kept.pdf")
+        commit(write_pdf([SourceInfo(src, "u")], edits, kept), kept)
         try:
-            write_pdf([SourceInfo(src, "u")], edits, out)
-        except EncryptionWouldBeLost:
+            pikepdf.open(kept).close()
+        except pikepdf.PasswordError:
             pass
         else:
-            raise AssertionError("encrypted source saved without opt-in")
-        assert not out.exists()
-        assert not [p for p in Path(tmp).iterdir() if p.suffix == ".tmp"]
+            raise AssertionError("protection was stripped")
+        with pikepdf.open(kept, password="u") as pdf:
+            assert len(pdf.pages) == len(PAGES) - 1 and not pdf.allow.extract
+        with pikepdf.open(kept, password="o") as pdf:
+            assert pdf.owner_password_matched, "the owner password still works"
 
-        commit(write_pdf([SourceInfo(src, "u")], edits, out, allow_decrypt={0}), out)
-        with PdfDocument(out) as doc:
-            assert doc.page_count == len(PAGES) - 1
+        changed = Path(tmp, "changed.pdf")
+        commit(write_pdf([SourceInfo(src, "o")], edits, changed, protection="fresh"), changed)
+        with pikepdf.open(changed, password="fresh") as pdf:
+            assert pdf.is_encrypted and pdf.encryption.bits == 256 and pdf.allow.extract
+        for old in ("u", "o"):
+            try:
+                pikepdf.open(changed, password=old).close()
+            except pikepdf.PasswordError:
+                pass
+            else:
+                raise AssertionError(f"old password {old!r} still opens it")
+
+        removed = Path(tmp, "removed.pdf")
+        commit(write_pdf([SourceInfo(src, "o")], edits, removed, protection=REMOVE), removed)
+        with PdfDocument(removed) as doc:  # no password
+            assert doc.page_count == len(PAGES) - 1 and not doc.is_encrypted
 
 
 def test_failed_commit_leaves_original_intact():

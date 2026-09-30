@@ -152,7 +152,23 @@ def run(log_path: Optional[str] = None) -> int:
         except PasswordRequired:
             pass
         with PdfDocument(work / "locked.pdf", password="pw") as doc:
-            return f"password prompt path works, {doc.page_count} pages"
+            count = doc.page_count
+            # Save keeps the protection (qpdf copies it), and a new password
+            # replaces it with AES-256: the encryption milestone, end to end.
+            from .writer import commit, write_pdf
+            kept, changed = work / "kept.pdf", work / "changed.pdf"
+            commit(write_pdf(doc.sources, doc.pages.deleted([0]), kept), kept)
+            commit(write_pdf(doc.sources, doc.pages, changed, protection="new pw"), changed)
+        for path, password in ((kept, "pw"), (changed, "new pw")):
+            try:
+                PdfDocument(path).close()
+                raise RuntimeError(f"{path.name} saved without its password")
+            except PasswordRequired:
+                pass
+            with PdfDocument(path, password=password) as doc:
+                if not doc.is_encrypted:
+                    raise RuntimeError(f"{path.name} isn't encrypted")
+        return f"{count} pages; saving keeps the password; a new one replaces it"
 
     def icon() -> str:
         from PySide6.QtGui import QIcon
@@ -171,7 +187,7 @@ def run(log_path: Optional[str] = None) -> int:
         step("print (to a PDF file)", printing)
         step("OCR (Windows)", recognize)
         step("edit, merge, save, reopen", edit_and_save)
-        step("open encrypted file", encrypted)
+        step("open, save and re-protect an encrypted file", encrypted)
 
     lines.append("")
     lines.append("RESULT: " + ("PASS" if failures == 0 else f"FAIL ({failures} step(s))"))

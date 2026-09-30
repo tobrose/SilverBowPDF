@@ -32,6 +32,7 @@ from .formpdf import apply_field_edits, apply_form_edits
 from .ocrlayer import FONT_DESCRIPTOR, FONT_NAME, GLYPH_WIDTH, TO_UNICODE, OcrEdits, OcrWord
 from .ocrlayer import content as ocr_content
 from .pagelist import PageList
+from .security import KEEP, REMOVE
 
 
 class SaveError(Exception):
@@ -39,14 +40,13 @@ class SaveError(Exception):
 
 
 class EncryptionWouldBeLost(SaveError):
-    """A source is encrypted and saving would silently strip that.
+    """Pages from a protected file would come out unprotected.
 
-    pikepdf's default save drops encryption (checked against pikepdf 10: a
-    file opened with its user password saves back out with no password at
-    all), and pages copied out of a protected file into another document
-    carry no protection with them. Re-encrypting properly needs the owner
-    password and permissions, which is the encryption milestone. Until then
-    the caller must opt in per source file, knowingly.
+    The document's own protection is kept (protection=KEEP: qpdf copies it,
+    passwords and restrictions unchanged) or replaced or removed only when
+    asked (security.py). But pages inserted from ANOTHER protected file carry
+    no protection with them, so if the result isn't protected either, the
+    caller must opt in for that file, knowingly (allow_decrypt).
     """
 
     def __init__(self, file: int, path: Path):
@@ -71,6 +71,7 @@ def write_pdf(
     fields: FieldEdits = FieldEdits(),
     forms: FormEdits = FormEdits(),
     ocr: OcrEdits = OcrEdits(),
+    protection: Optional[str] = KEEP,
 ) -> Path:
     """Build the edited PDF into a temp file beside `dest` and return its path.
 
@@ -79,8 +80,12 @@ def write_pdf(
     in, bringing their form fields, the named destinations their links use,
     and their bookmarks (under a folder named after the file).
 
-    allow_decrypt: indices of encrypted sources the user agreed to write out
-    unprotected. Any other encrypted source raises EncryptionWouldBeLost.
+    protection: security.KEEP (the base document's own protection, if any,
+    unchanged), security.REMOVE (none), or a new open password (AES-256).
+
+    allow_decrypt: indices of other encrypted sources whose pages the user
+    agreed may come out unprotected. Only asked when the result has no
+    protection; otherwise EncryptionWouldBeLost.
 
     annots: annotation edits per (file, source page); see annots.py.
     fields: filled-in form values per (file, field name); see fields.py.
@@ -99,7 +104,10 @@ def write_pdf(
             for f in used:
                 src = sources[f]
                 pdf = stack.enter_context(pikepdf.open(src.path, password=src.password or ""))
-                if pdf.is_encrypted and f not in allow_decrypt:
+                if f == 0:
+                    protected = (protection not in (KEEP, REMOVE)
+                                 or (protection is KEEP and pdf.is_encrypted))
+                elif pdf.is_encrypted and not protected and f not in allow_decrypt:
                     raise EncryptionWouldBeLost(f, Path(src.path))
                 highest = max((r.source for r in pages if r.file == f), default=-1)
                 if len(pdf.pages) <= highest:
@@ -196,14 +204,32 @@ def write_pdf(
             # nothing, and one code path is one thing to get right.
             prune_dangling(base)
 
-            base.save(tmp)
+            if protection is KEEP:
+                # True = qpdf copies the file's own encryption: same method,
+                # passwords and restrictions, whichever password opened it
+                # (checked, pikepdf 10). pikepdf's default would strip it.
+                encryption = True if base.is_encrypted else None
+                check_password = sources[0].password or ""
+            elif protection == REMOVE:
+                encryption, check_password = False, ""
+            else:
+                # An open password only (user's design): no restrictions, and
+                # the same password as owner so whoever opens it can change it.
+                encryption = pikepdf.Encryption(
+                    user=protection, owner=protection, R=6,
+                    allow=pikepdf.Permissions(modify_assembly=True))
+                check_password = protection
+            base.save(tmp, encryption=encryption)
 
-        # Reopen and count before letting the caller replace anything.
-        with pikepdf.open(tmp) as check:
+        # Reopen and count before letting the caller replace anything -- and
+        # confirm the protection is what was asked for, not just assumed.
+        with pikepdf.open(tmp, password=check_password) as check:
             if len(check.pages) != len(pages):
                 raise SaveError(
                     f"wrote {len(check.pages)} pages, expected {len(pages)}"
                 )
+            if check.is_encrypted != protected:
+                raise SaveError("the saved file's password protection is not what was asked for")
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise

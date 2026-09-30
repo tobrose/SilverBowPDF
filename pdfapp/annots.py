@@ -457,10 +457,12 @@ class AnnotEdits:
 @dataclass(frozen=True)
 class DocState:
     """Everything the undo history snapshots: pages, annotation edits, form
-    field values, form structure and recognised (OCR) text layers."""
+    field values, form structure, recognised (OCR) text layers, and the
+    password protection to save with (security.py: None keeps the file's)."""
 
     pages: PageList
     annots: AnnotEdits = field(default_factory=AnnotEdits)
     fields: FieldEdits = field(default_factory=FieldEdits)
     forms: FormEdits = field(default_factory=FormEdits)
     ocr: OcrEdits = field(default_factory=OcrEdits)
+    protection: Optional[str] = None

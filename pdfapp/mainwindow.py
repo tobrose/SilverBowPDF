@@ -21,12 +21,15 @@ from PySide6.QtWidgets import (
     QProgressDialog,
     QDockWidget,
     QFileDialog,
+    QFrame,
+    QHBoxLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
     QMenu,
     QMessageBox,
+    QPushButton,
     QSpinBox,
     QToolBar,
     QToolButton,
@@ -49,7 +52,9 @@ from .annots import (
 from .document import DocumentError, PasswordRequired, PdfDocument, SourceInfo
 from .findbar import FindBar
 from .pagelist import History, PageList
-from .printing import PrintError, print_pages
+from .printing import LOW_RES_DPI, PRINT_DPI, PrintError, print_pages
+from .protection import SET, UNLOCK, ProtectionDialog
+from .security import FULL_ACCESS, KEEP, REMOVE, Access
 from .fields import (
     COMBO,
     FLAG_MULTILINE,
@@ -92,10 +97,34 @@ class MainWindow(QMainWindow):
 
         self.view = PdfView(self)
         self.find_bar = FindBar(self.view, self)
+        # Says what a restricted document's author has turned off, and offers
+        # the owner password -- mouse users need the why, not just grey buttons.
+        self.restriction_bar = QFrame(self)
+        self.restriction_bar.setObjectName("restrictions")
+        # Explicit colours for the button too: in Windows' dark mode it would
+        # draw pale text on this pale bar (seen, not guessed).
+        self.restriction_bar.setStyleSheet(
+            "#restrictions { background: #fff4ce; border-bottom: 1px solid #e0c870; }"
+            "QLabel { color: #3b3000; }"
+            "QPushButton { color: #1e1e1e; background: #ffffff; border: 1px solid #b89b2e;"
+            " border-radius: 3px; padding: 3px 14px; }"
+            "QPushButton:hover { background: #fffbe8; }"
+            "QPushButton:pressed { background: #f3e6b0; }")
+        row = QHBoxLayout(self.restriction_bar)
+        row.setContentsMargins(10, 5, 10, 5)
+        self.restriction_text = QLabel(self.restriction_bar)
+        self.restriction_text.setWordWrap(True)
+        row.addWidget(self.restriction_text, 1)
+        unlock = QPushButton("Unlock…", self.restriction_bar)
+        unlock.setToolTip("Enter the owner password to lift the restrictions")
+        unlock.clicked.connect(self.unlock)
+        row.addWidget(unlock)
+        self.restriction_bar.hide()
         central = QWidget(self)
         column = QVBoxLayout(central)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(0)
+        column.addWidget(self.restriction_bar)
         column.addWidget(self.find_bar)
         column.addWidget(self.view, 1)
         self.setCentralWidget(central)
@@ -145,6 +174,8 @@ class MainWindow(QMainWindow):
                                    triggered=self.save_as)
         self.act_print = QAction("&Print…", self, shortcut=QKeySequence.Print,
                                  triggered=self.print_dialog)
+        self.act_protect = QAction("Password &Protection…", self,
+                                   triggered=self.password_protection)
         self.act_close = QAction("&Close", self, shortcut=QKeySequence.Close,
                                  triggered=self.close_document)
         self.act_quit = QAction("&Quit", self, shortcut=QKeySequence.Quit,
@@ -406,7 +437,8 @@ class MainWindow(QMainWindow):
         self.view.tool_changed.connect(self._on_tool_changed)
         self.view.editing_changed.connect(self._on_editing_changed)
         self.view.message.connect(lambda text: self.statusBar().showMessage(text, 8000))
-        self.view.text_selection_changed.connect(self.act_copy.setEnabled)
+        self.view.text_selection_changed.connect(
+            lambda has: self.act_copy.setEnabled(has and self.access.copy))
         self.view.text_style_changed.connect(self._show_text_style)
         self.view.highlight_color_changed.connect(
             lambda c: self.act_tool_highlight.setIcon(self._swatch(c)))
@@ -416,6 +448,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.act_open)
         file_menu.addAction(self.act_save)
         file_menu.addAction(self.act_save_as)
+        file_menu.addAction(self.act_protect)
         file_menu.addSeparator()
         file_menu.addAction(self.act_print)
         file_menu.addSeparator()
@@ -482,7 +515,8 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.status_right)
 
     def _set_document_actions_enabled(self, enabled: bool) -> None:
-        for act in (self.act_close, self.act_save_as, self.act_print, self.act_ocr, self.act_zoom_in,
+        for act in (self.act_close, self.act_save_as, self.act_protect, self.act_print,
+                    self.act_ocr, self.act_zoom_in,
                     self.act_zoom_out,
                     self.act_zoom_100, self.act_fit_width, self.act_fit_page,
                     self.act_page_rot_ccw,
@@ -497,6 +531,7 @@ class MainWindow(QMainWindow):
         self.page_spin.setEnabled(enabled)
         self.zoom_box.setEnabled(enabled)
         self._refresh_edit_state()
+        self._apply_access()
 
     # ---- opening -------------------------------------------------------
 
@@ -557,7 +592,7 @@ class MainWindow(QMainWindow):
 
     def print_dialog(self) -> None:
         doc = self.view.document
-        if doc is None:
+        if doc is None or not self._allowed(self.access.print, "printing it"):
             return
         self.view.commit_text_edit()  # what's being typed prints too
         self.view.commit_field_edit()
@@ -606,8 +641,10 @@ class MainWindow(QMainWindow):
             QApplication.processEvents()
             return not progress.wasCanceled()
 
+        # "Low-resolution printing only" is a real restriction authors set.
+        dpi = PRINT_DPI if self.access.print_high else LOW_RES_DPI
         try:
-            failures = print_pages(self.view.renderer, printer, pages, tick)
+            failures = print_pages(self.view.renderer, printer, pages, tick, max_dpi=dpi)
         except PrintError as exc:
             progress.close()
             QMessageBox.critical(self, "Print", str(exc))
@@ -632,7 +669,8 @@ class MainWindow(QMainWindow):
         sidebar selection if it's several pages, else the whole document).
         One undoable edit; saved into the file like any other."""
         doc = self.view.document
-        if doc is None or self.history is None:
+        if doc is None or self.history is None or not self._allowed(
+                self.access.modify, "changing its content (OCR adds text to the pages)"):
             return
         self.view.commit_text_edit()
         self.view.commit_field_edit()
@@ -714,8 +752,129 @@ class MainWindow(QMainWindow):
     def _describe(indices: list[int]) -> str:
         return f"Page {indices[0] + 1}" if len(indices) == 1 else f"{len(indices)} Pages"
 
+    # ---- restrictions set by a document's author (security.py) ---------
+
+    @property
+    def access(self) -> Access:
+        doc = self.view.document
+        return doc.access() if doc is not None else FULL_ACCESS
+
+    def _allowed(self, allowed: bool, what: str) -> bool:
+        """The gate on every edit entry point. Greyed-out buttons are the
+        visible half; this holds for requests no button stops (a drag, a
+        key, a right-click menu)."""
+        if not allowed:
+            self.statusBar().showMessage(
+                f"This document's author doesn't allow {what}. "
+                "Unlock it with the owner password to change that.", 10000)
+        return allowed
+
+    def _apply_access(self) -> None:
+        """Turn off what the document's restrictions forbid, and say so in
+        the bar above the pages. Only ever disables: what's on otherwise is
+        decided by whoever called this (document open, editing ended)."""
+        a = self.access
+        self.view.access = a
+        off = []
+        if not a.annotate:
+            off += [self.tool_actions[t] for t in self.annotate_tools] + [self.act_delete_annot]
+        if not a.modify:
+            off += [self.tool_actions[t] for t in self.form_tools] + [self.act_ocr]
+        if not a.assemble:
+            off += [self.act_page_rot_ccw, self.act_page_rot_cw, self.act_page_up,
+                    self.act_page_down, self.act_page_delete, self.act_page_insert]
+        if not a.copy:
+            off += [self.act_page_extract, self.act_copy]
+        if not a.print:
+            off.append(self.act_print)
+        for act in off:
+            act.setEnabled(False)
+        self.annotate_button.setEnabled(a.annotate)
+        self.form_button.setEnabled(a.modify)
+        restricted = a.restricted() if self.view.document is not None else []
+        if restricted:
+            listed = ", ".join(restricted[:-1]) + (" and " if len(restricted) > 1 else "") \
+                + restricted[-1]
+            self.restriction_text.setText(
+                f"<b>Restricted by the document's author:</b> {listed} "
+                f"{'is' if len(restricted) == 1 else 'are'} turned off.")
+        self.restriction_bar.setVisible(bool(restricted))
+
+    def unlock(self, password: Optional[str] = None) -> bool:
+        """Reopen with the owner password (asked for if not given), which
+        lifts the restrictions. The edits so far and their undo history
+        carry over. True if unlocked."""
+        doc = self.view.document
+        if doc is None or self.history is None:
+            return False
+        if password is None:
+            password, ok = QInputDialog.getText(
+                self, "Unlock", f"Owner password for {doc.path.name}:", QLineEdit.Password)
+            if not ok or not password:
+                return False
+        try:
+            with PdfDocument(doc.path, password=password) as trial:
+                full = trial.access().full
+        except (PasswordRequired, DocumentError):
+            full = False
+        if not full:
+            QMessageBox.warning(self, "Unlock", "That isn't the owner password for this document.")
+            return False
+        sources = doc.sources
+        sources[0] = SourceInfo(sources[0].path, password)
+        self._reopen(sources, keep_edits=self.history.current)
+        self.statusBar().showMessage("Unlocked: the author's restrictions are lifted "
+                                     "for this session. Saving keeps them in the file.", 10000)
+        return True
+
+    def password_protection(self) -> None:
+        doc = self.view.document
+        if doc is None or self.history is None:
+            return
+        needs_password = False
+        if doc.is_encrypted:
+            try:  # does it open with no password (restrictions only)?
+                PdfDocument(doc.path).close()
+            except PasswordRequired:
+                needs_password = True
+            except DocumentError:
+                pass
+        dialog = ProtectionDialog(self, doc.path.name, doc.is_encrypted, needs_password,
+                                  self.history.current.protection, self.access.full)
+        if dialog.exec() == QDialog.Accepted and dialog.choice is not None:
+            self.set_protection(*dialog.choice)
+
+    def set_protection(self, what: str, password: Optional[str] = None) -> None:
+        """Apply a Password Protection choice as an undoable edit."""
+        if what == UNLOCK:
+            self.unlock()
+            return
+        if not self.access.full:  # the dialog doesn't offer it; this holds regardless
+            self._allowed(False, "changing its password protection")
+            return
+        doc, current = self.view.document, self.history.current
+        protected_now = (doc.is_encrypted and current.protection is KEEP) or \
+            current.protection not in (KEEP, REMOVE)
+        if what == SET:
+            label = "Change Password" if protected_now else "Add Password"
+            value = password
+            note = "The password will be applied when you save."
+        else:
+            label = "Remove Password"
+            # Removing a password that was only pending just drops it.
+            value = REMOVE if doc.is_encrypted else KEEP
+            note = "The password protection will be removed when you save."
+        state = replace(current, protection=value)
+        if state == current:
+            return
+        self.history.push(state, label)
+        self._refresh_edit_state()
+        self.statusBar().showMessage(f"{note} (Ctrl+Z undoes it.)", 10000)
+
+    # ---- page edits (continued) ----------------------------------------
+
     def _edit(self, pages: PageList, label: str, current: int, select: list[int]) -> None:
-        if self.history is None:
+        if self.history is None or not self._allowed(self.access.assemble, "changing its pages"):
             return
         state = replace(self.history.current, pages=pages)
         if state == self.history.current:
@@ -752,7 +911,8 @@ class MainWindow(QMainWindow):
     # ---- annotation edits ----------------------------------------------
 
     def _on_annots_edit(self, key, annots, label: str) -> None:
-        if self.history is None:
+        if self.history is None or not self._allowed(self.access.annotate,
+                                                     "adding or changing comments and marks"):
             return
         current = self.history.current
         state = replace(current, annots=current.annots.with_page(key, annots))
@@ -762,7 +922,8 @@ class MainWindow(QMainWindow):
         self._show_state(state, self.view.current_page)
 
     def _on_fields_edit(self, key, value: str, label: str) -> None:
-        if self.history is None:
+        if self.history is None or not self._allowed(self.access.fill_forms,
+                                                     "filling in its forms"):
             return
         current = self.history.current
         state = replace(current, fields=current.fields.with_value(key, value))
@@ -772,7 +933,8 @@ class MainWindow(QMainWindow):
         self._show_state(state, self.view.current_page)
 
     def _on_forms_edit(self, key, widgets, label: str, rename=None) -> None:
-        if self.history is None:
+        if self.history is None or not self._allowed(self.access.modify,
+                                                     "changing its form fields"):
             return
         current = self.history.current
         fields = current.fields
@@ -920,6 +1082,7 @@ class MainWindow(QMainWindow):
         if not editing:
             self._refresh_edit_state()
             self.act_copy.setEnabled(bool(self.view.selected_text()))
+            self._apply_access()
 
     def _set_highlight_color(self, color) -> None:
         self.view.highlight_color = color
@@ -930,7 +1093,7 @@ class MainWindow(QMainWindow):
 
     def copy_text(self) -> None:
         text = self.view.selected_text()
-        if text:
+        if text and self._allowed(self.access.copy, "copying its text"):
             QApplication.clipboard().setText(text)
             self.statusBar().showMessage(f"Copied {len(text)} characters", 3000)
 
@@ -1091,6 +1254,13 @@ class MainWindow(QMainWindow):
             file = self._with_password(path, lambda pw, p=path: doc.add_source(p, pw))
             if file is None:
                 continue  # cancelled or unreadable; already reported
+            if not doc.access(file).copy:
+                # Taking a restricted file's pages is copying them out of it.
+                QMessageBox.warning(
+                    self, "Can't insert pages",
+                    f"The author of {path.name} doesn't allow its pages to be copied, "
+                    f"so they can't be inserted into another document.")
+                continue
             refs = doc.source_refs(file)
             pages = pages.inserted(refs, at)
             at += len(refs)
@@ -1122,7 +1292,8 @@ class MainWindow(QMainWindow):
         are included -- extract what you see.
         """
         doc = self.view.document
-        if doc is None or not indices:
+        if doc is None or not indices or not self._allowed(self.access.copy,
+                                                           "copying pages out of it"):
             return False
         indices = sorted(indices)
         suggested = doc.path.with_name(self._extract_name(doc.path.stem, indices))
@@ -1195,23 +1366,19 @@ class MainWindow(QMainWindow):
         sources the user let lose protection, or None if the user declined or
         it failed (already reported)."""
         doc = self.view.document
+        # The document's own protection is kept unless File > Password
+        # Protection changed it (security.py) -- Save and Save As alike.
+        protection = self.history.current.protection if self.history else KEEP
         allowed: set[int] = set()
         while True:
             try:
                 return write_pdf(doc.sources, pages, dest, allow_decrypt=allowed,
                                  annots=doc.annots, fields=doc.fields, forms=doc.forms,
-                                 ocr=doc.ocr), allowed
+                                 ocr=doc.ocr, protection=protection), allowed
             except EncryptionWouldBeLost as exc:
-                if exc.file == 0 and self._same_file(dest, doc.path):
-                    QMessageBox.warning(
-                        self, "Can't save over a protected file",
-                        f"{doc.path.name} is password-protected, and saving changes "
-                        f"would remove the password. {APP_NAME} can't re-apply "
-                        f"encryption yet.\n\nUse Save As to write an unprotected copy "
-                        f"under a different name.",
-                    )
-                    return None
-                if not self._confirm_unprotected_copy(exc.path, dest, inserted=exc.file != 0):
+                # Only pages inserted from another protected file, going into
+                # an unprotected result, get here.
+                if not self._confirm_unprotected_copy(exc.path, dest):
                     return None
                 allowed.add(exc.file)
             except Exception as exc:  # nothing on disk has changed
@@ -1219,15 +1386,13 @@ class MainWindow(QMainWindow):
                                      f"Could not write {dest.name}:\n\n{exc}")
                 return None
 
-    def _confirm_unprotected_copy(self, source: Path, dest: Path, inserted: bool) -> bool:
-        what = (f"Pages you inserted from {source.name} are password-protected in that "
-                f"file. In {dest.name} they will NOT be" if inserted else
-                f"{source.name} is password-protected. The copy saved as {dest.name} "
-                f"will NOT have a password")
+    def _confirm_unprotected_copy(self, source: Path, dest: Path) -> bool:
         answer = QMessageBox.warning(
-            self, "Save unprotected copy?",
-            f"{what} — anyone who gets the file can open it.\n\n"
-            f"{source.name} itself stays protected.",
+            self, "Save pages unprotected?",
+            f"Pages you inserted from {source.name} are password-protected in that "
+            f"file. In {dest.name} they will NOT be — anyone who gets the file can "
+            f"open it.\n\n{source.name} itself stays protected. To protect "
+            f"{dest.name} too, use File > Password Protection before saving.",
             QMessageBox.Save | QMessageBox.Cancel, QMessageBox.Cancel,
         )
         return answer == QMessageBox.Save
@@ -1257,7 +1422,9 @@ class MainWindow(QMainWindow):
 
         # The saved file is the new baseline, with the edits baked in. The undo
         # history refers to the old files' page numbers, so it starts over.
-        password = None if 0 in allowed else doc.password
+        protection = self.history.current.protection
+        password = (doc.password if protection is KEEP
+                    else None if protection == REMOVE else protection)
         try:
             self._reopen([SourceInfo(dest, password)])
         except Exception as exc:

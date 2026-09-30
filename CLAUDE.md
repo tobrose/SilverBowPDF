@@ -56,6 +56,10 @@ pdfapp/
                  text at all (has_text) are recognised. Loads QtCore before
                  winrt ON PURPOSE: winrt ships an older msvcp140 (14.29) and
                  loading it first makes Qt (14.44) crash (access violation).
+  security.py    Access (what a password allows, from pdfium's effective
+                 permission bits) and the protection values KEEP / REMOVE /
+                 "<new open password>". No libs.
+  protection.py  File > Password Protection dialog (Qt).
   findbar.py     Ctrl+F bar. Scans pages in 30ms timer slices from the current
                  page (find_text: pdfium search, throwaway text pages so a long
                  document isn't pinned in memory); the view paints the matches.
@@ -121,11 +125,16 @@ dev machine.
 warning or a resize.
 
 **5. Never silently drop encryption.** pikepdf's default save strips it
-(verified, pikepdf 10), and pages inserted from a protected file carry no
-protection into another document. `write_pdf` raises `EncryptionWouldBeLost`
-(naming the source file) unless that file's index is in `allow_decrypt` after
-the user explicitly agreed, and a protected original is never overwritten with
-an unprotected file.
+(verified, pikepdf 10). `write_pdf(protection=KEEP)` -- the default -- saves
+with `encryption=True`, which makes qpdf copy the file's own encryption:
+same method, passwords and restrictions, whichever password opened it
+(verified). Protection changes only through an explicit, undoable File >
+Password Protection edit (DocState.protection: a new open password, or
+REMOVE), and only with full access. Pages inserted from ANOTHER protected
+file carry no protection, so if the result is unprotected `write_pdf` raises
+`EncryptionWouldBeLost` unless that file is in `allow_decrypt` (user agreed).
+The writer re-opens what it wrote and checks the protection is what was
+asked for.
 
 **6. Never reorder pages with pikepdf's slice assignment, insert or reverse.**
 They silently COPY a page that's already in the tree, so every bookmark, link
@@ -288,7 +297,21 @@ HKLM\Software\Policies\SilverbowPDF\SingleKeyShortcuts locks it either way
 (settings.py; installer task lockletterkeys). Ctrl shortcuts always on.
 Tests pass INI-backed QSettings -- never touch the real registry.
 
-Next: encryption (re-encrypting on save; see Known limits).
+Encryption (user's choices, 2026-09-30): Save and Save As keep a protected
+file's protection exactly (rule 5). File > Password Protection sets,
+changes or removes an OPEN PASSWORD only (AES-256, owner = user password,
+no restrictions) -- an undoable edit applied on save. Authors' restrictions
+are HONOURED like Acrobat: without the owner password, what's forbidden is
+off (buttons disabled, AND every edit entry point in MainWindow gated via
+_allowed -- _edit, _on_annots_edit, _on_fields_edit, _on_forms_edit, OCR,
+print, copy, extract, insert), PdfView.access stops the page offering it,
+and a yellow bar says what's off with Unlock… (owner password; reopens,
+keeps edits and history). Low-res-only printing caps at 150 DPI. Pages
+from a restricted file (no copying) can't be inserted elsewhere. Changing
+protection needs full access, so nobody strips restrictions by
+re-protecting. The self-test saves a protected file and re-protects one.
+
+Next: nothing queued -- ask.
 
 Deployment target is shared multi-session desktops: no GPU, non-persistent
 profiles, pixels re-encoded over a remote-display protocol. Keep memory and repaints lean; don't
@@ -321,8 +344,11 @@ count on per-user settings surviving logoff.
 - Removing pages doesn't rewrite the tagged-PDF structure tree or
   /PageLabels. Both are index/structure based; rewriting them wrong is worse
   than leaving them.
-- Encrypted files: Save is refused, Save As writes an unprotected copy after
-  an explicit warning. Real re-encryption is the encryption milestone.
+- Password Protection sets an open password only; creating restrictions
+  (owner password + permissions) isn't offered (user's call). Restrictions
+  a file already has are kept on save and honoured.
+- Certificate (public-key) security isn't supported: pdfium can't open it.
+- Unlock lasts until the document is closed; the file keeps its restrictions.
 
 - Rendering is synchronous. Fine for text; a 600 DPI scan at 400% hitches.
   The planned fix is moving `PageRenderer` onto a `QThreadPool`; the interface

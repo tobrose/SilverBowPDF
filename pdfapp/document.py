@@ -14,6 +14,7 @@ from .annots import MARKUP_KINDS, Annot, AnnotEdits, PageKey, is_editable
 from .fields import CHECKBOX, COMBO, RADIO, TEXT, FieldEdits, FormEdits, Widget
 from .ocrlayer import OcrEdits, text_layer_pdf
 from .pagelist import PageList, PageRef
+from .security import Access, access_from_bits
 from .textlayout import parse_da
 from .transform import PageTransform, normalize_rotation
 
@@ -156,6 +157,20 @@ class PdfDocument:
     @property
     def sources(self) -> List[SourceInfo]:
         return [s.info for s in self._sources]
+
+    def access(self, file: int = 0) -> Access:
+        """What the password a source was opened with allows (security.py).
+        File 0's is the document's; an inserted file's says whether its
+        pages may be taken at all."""
+        if self._closed:
+            raise DocumentError("document is closed")
+        pdf = self._sources[file].pdf
+        return access_from_bits(pdfium_c.FPDF_GetSecurityHandlerRevision(pdf),
+                                pdfium_c.FPDF_GetDocPermissions(pdf))
+
+    @property
+    def is_encrypted(self) -> bool:
+        return self.access().encrypted
 
     def add_source(self, path: str | Path, password: Optional[str] = None) -> int:
         """Open another PDF to take pages from. Returns its file index.

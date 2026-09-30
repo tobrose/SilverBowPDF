@@ -70,6 +70,7 @@ from .fields import (
 from .textlayout import PADDING, encodable, layout
 from .document import PdfDocument
 from .rendering import PageRenderer
+from .security import FULL_ACCESS
 from .transform import PageTransform, normalize_rotation
 
 PAGE_GAP = 14          # logical px between pages
@@ -447,6 +448,10 @@ class PdfView(QScrollArea):
         self._search_current = None  # (page index, start) of the current match
         self._pan = None        # (last global pos, mouse button) while panning
         self._mark_bar = None   # _MarkBar under a fresh text selection, see _show_mark_bar
+        # What the document's author allows (security.py). MainWindow sets
+        # it and gates every edit; this keeps the page from offering (a drag,
+        # the mark bar, a field to type in) what would then be refused.
+        self.access = FULL_ACCESS
         self.highlight_color = HIGHLIGHT_COLORS["Yellow"]
         self.text_size = 12.0
         self.text_color = TEXT_COLORS["Black"]
@@ -577,7 +582,7 @@ class PdfView(QScrollArea):
         tool). Sits under the selection's last line, or above its first
         when there's no room below; always inside the page."""
         self._hide_mark_bar()
-        if self._tool is not Tool.SELECT or self._text_sel is None:
+        if self._tool is not Tool.SELECT or self._text_sel is None or not self.access.annotate:
             return
         index, start, end = self._text_sel
         page = self._pages[index]
@@ -795,7 +800,8 @@ class PdfView(QScrollArea):
                 return True
             self._drag = {"mode": "place", "page": page, "press": pos, "end": None}
             return True
-        edge = self._resize_hit(page, pos) if self._tool is Tool.SELECT else None
+        edge = self._resize_hit(page, pos) \
+            if self._tool is Tool.SELECT and self.access.annotate else None
         if edge is not None:
             annot, edges = edge
             self.select_annot(page.index, annot.ident)
@@ -810,9 +816,15 @@ class PdfView(QScrollArea):
             if widget is not None:
                 self.select_annot(page.index, None)
                 self.clear_text_selection()
-                self._fill(page, widget)
+                if self.access.fill_forms:
+                    self._fill(page, widget)
+                else:
+                    self.message.emit("This document's author doesn't allow filling in "
+                                      "its forms.")
                 return True
         self.select_annot(page.index, annot.ident if annot else None)
+        if annot is not None and not annot.is_markup and not self.access.annotate:
+            return True  # selected, to read; not moved
         if annot is not None and not annot.is_markup:
             self.clear_text_selection()
             self._drag = {"mode": "move", "page": page, "annot": annot, "press": pos,
@@ -885,14 +897,14 @@ class PdfView(QScrollArea):
             return
         if self._tool is not Tool.SELECT:
             return
-        edge = self._resize_hit(page, pos)
+        edge = self._resize_hit(page, pos) if self.access.annotate else None
         if edge is not None:
             page.setCursor(_EDGE_CURSORS[edge[1]])
             QToolTip.hideText()
             return
         annot = self._annot_at(page, pos)
         widget = None if annot is not None else self._widget_at(page, pos)
-        if annot is not None and not annot.is_markup:
+        if annot is not None and not annot.is_markup and self.access.annotate:
             page.setCursor(Qt.SizeAllCursor)
         elif widget is not None:
             page.setCursor(Qt.IBeamCursor if widget.kind == TEXT else Qt.PointingHandCursor)
@@ -971,7 +983,7 @@ class PdfView(QScrollArea):
         if self._tool is not Tool.SELECT or self.document is None:
             return False
         pos = event.position().toPoint()
-        annot = self._annot_at(page, pos)
+        annot = self._annot_at(page, pos) if self.access.annotate else None
         if annot is not None and annot.kind == "FreeText":
             self._edit_text(page, annot)
             return True
@@ -1581,7 +1593,7 @@ class PdfView(QScrollArea):
         return True
 
     def keyPressEvent(self, event) -> None:
-        if event.key() in (Qt.Key_Delete, Qt.Key_Backspace) and (
+        if event.key() in (Qt.Key_Delete, Qt.Key_Backspace) and self.access.annotate and (
                 self.delete_selected_field() or self.delete_selected_annot()):
             return
         if event.key() == Qt.Key_Escape:

@@ -21,6 +21,7 @@ from PySide6.QtPrintSupport import QPrinter
 from .rendering import PageRenderer
 
 PRINT_DPI = 300
+LOW_RES_DPI = 150  # for documents whose author allows low-resolution printing only
 
 
 class PrintError(RuntimeError):
@@ -43,7 +44,8 @@ def place_on_sheet(page_w: float, page_h: float, area_w: float, area_h: float
 
 
 def print_pages(renderer: PageRenderer, printer: QPrinter, pages: Sequence[int],
-                progress: Optional[Callable[[int], bool]] = None) -> List[Tuple[int, str]]:
+                progress: Optional[Callable[[int], bool]] = None,
+                max_dpi: int = PRINT_DPI) -> List[Tuple[int, str]]:
     """Print `pages` (displayed indices, in order). progress(n) is called
     before each sheet; returning False cancels the job.
 
@@ -69,8 +71,8 @@ def print_pages(renderer: PageRenderer, printer: QPrinter, pages: Sequence[int],
             turned, s, target = place_on_sheet(page_w, page_h, area.width(), area.height())
             try:
                 # s is device px per point; no point rendering finer than the
-                # sheet will show, nor finer than PRINT_DPI.
-                image = renderer.print_image(index, min(s, PRINT_DPI / 72.0))
+                # sheet will show, nor finer than max_dpi.
+                image = renderer.print_image(index, min(s, max_dpi / 72.0))
             except Exception as exc:  # isolate, display, don't hide (rule 7)
                 failures.append((index, str(exc)))
                 painter.setPen(QColor("#b00020"))

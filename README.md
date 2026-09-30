@@ -38,6 +38,7 @@ on a headless box.
 | Drag thumbnails | Reorder pages (Ctrl/Shift+click to select several) |
 | `Ctrl+Z` `Ctrl+Y` | Undo / redo |
 | `Ctrl+S` `Ctrl+Shift+S` | Save / save as |
+| File > Password Protection | Add, change or remove a password to open the document (AES-256), applied on save. Protected files stay protected when saved |
 | `Ctrl+P` | Print what's on screen (edits included, no field tint): all, a range, the current page or the sidebar selection |
 | Right-click a page | Page operations for that page |
 | Tools > Single-Letter Tool Shortcuts | Turn on the letter keys below (off by default) |
