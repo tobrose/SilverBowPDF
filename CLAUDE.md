@@ -49,6 +49,10 @@ pdfapp/
   findbar.py     Ctrl+F bar. Scans pages in 30ms timer slices from the current
                  page (find_text: pdfium search, throwaway text pages so a long
                  document isn't pinned in memory); the view paints the matches.
+  printing.py    File > Print. PageRenderer.print_image per sheet (pdfium's
+                 FPDF_PRINTING, no form-field tint, unsaved edits included),
+                 fitted and centred, turned a quarter when bigger (against
+                 the page's own /Rotate so it lands upright), max 300 DPI.
   thumbnails.py  Page sidebar: multi-select, drag-to-reorder, lazy thumbnails.
                  Emits requests only; MainWindow makes the PageList edit.
   mainwindow.py  Menus, toolbar, status bar, drag-and-drop.
@@ -60,7 +64,7 @@ packaging/       PyInstaller spec, Inno Setup script, build script. icon.ico is 
 ```
 
 Dependency direction is one-way: `transform` <- `pagelist` <- `document` <-
-`rendering` <- `pageview`/`thumbnails` <- `findbar` <- `mainwindow`, with `writer` depending only on
+`rendering` <- `pageview`/`thumbnails`/`printing` <- `findbar` <- `mainwindow`, with `writer` depending only on
 `pagelist` and used only by `mainwindow`. Nothing lower imports anything higher.
 
 Page edits never mutate anything until save: pdfium keeps rendering the
@@ -236,6 +240,12 @@ The Highlight/Underline/Strikethrough tools still mark directly, no bar.
 Rotate View (left/right, Ctrl+L/R) was removed (user's call): a turned view
 on top of turned pages confused users. Page rotation (sidebar, Pages menu)
 is the only rotation.
+
+Print (Ctrl+P, toolbar, File menu): Windows print dialog -- all, a range,
+current page, or the sidebar selection; copies (sent as extra sheets if
+the driver can't); progress with Cancel. A page that fails to render gets
+its error printed on its sheet and is listed afterwards (rule 7). The
+self-test prints to PDF and logs how many printers the app can see.
 
 Find (Ctrl+F; F3 / Shift+F3, Enter / Shift+Enter): bar above the view,
 match case / whole words, "3 of 17", all matches tinted, current one

@@ -9,6 +9,7 @@ from typing import Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QKeySequence, QPixmap
+from PySide6.QtPrintSupport import QAbstractPrintDialog, QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -17,6 +18,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFormLayout,
     QPlainTextEdit,
+    QProgressDialog,
     QDockWidget,
     QFileDialog,
     QInputDialog,
@@ -47,6 +49,7 @@ from .annots import (
 from .document import DocumentError, PasswordRequired, PdfDocument, SourceInfo
 from .findbar import FindBar
 from .pagelist import History, PageList
+from .printing import PrintError, print_pages
 from .fields import (
     COMBO,
     FLAG_MULTILINE,
@@ -140,6 +143,8 @@ class MainWindow(QMainWindow):
                                 triggered=self.save)
         self.act_save_as = QAction("Save &As…", self, shortcut=QKeySequence("Ctrl+Shift+S"),
                                    triggered=self.save_as)
+        self.act_print = QAction("&Print…", self, shortcut=QKeySequence.Print,
+                                 triggered=self.print_dialog)
         self.act_close = QAction("&Close", self, shortcut=QKeySequence.Close,
                                  triggered=self.close_document)
         self.act_quit = QAction("&Quit", self, shortcut=QKeySequence.Quit,
@@ -351,6 +356,7 @@ class MainWindow(QMainWindow):
 
         bar.addAction(self.act_open)
         bar.addAction(self.act_save)
+        bar.addAction(self.act_print)
         bar.addSeparator()
         bar.addAction(self.act_undo)
         bar.addAction(self.act_redo)
@@ -407,6 +413,9 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.act_open)
         file_menu.addAction(self.act_save)
         file_menu.addAction(self.act_save_as)
+        file_menu.addSeparator()
+        file_menu.addAction(self.act_print)
+        file_menu.addSeparator()
         file_menu.addAction(self.act_close)
         file_menu.addSeparator()
         file_menu.addAction(self.act_quit)
@@ -468,7 +477,8 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.status_right)
 
     def _set_document_actions_enabled(self, enabled: bool) -> None:
-        for act in (self.act_close, self.act_save_as, self.act_zoom_in, self.act_zoom_out,
+        for act in (self.act_close, self.act_save_as, self.act_print, self.act_zoom_in,
+                    self.act_zoom_out,
                     self.act_zoom_100, self.act_fit_width, self.act_fit_page,
                     self.act_page_rot_ccw,
                     self.act_page_rot_cw, self.act_page_up, self.act_page_down,
@@ -537,6 +547,78 @@ class MainWindow(QMainWindow):
         if answer == QMessageBox.Save:
             return self.save()
         return answer == QMessageBox.Discard
+
+    # ---- printing ------------------------------------------------------
+
+    def print_dialog(self) -> None:
+        doc = self.view.document
+        if doc is None:
+            return
+        self.view.commit_text_edit()  # what's being typed prints too
+        self.view.commit_field_edit()
+        printer = QPrinter(QPrinter.HighResolution)
+        printer.setDocName(doc.title())
+        dialog = QPrintDialog(printer, self)
+        dialog.setMinMax(1, doc.page_count)
+        options = (QAbstractPrintDialog.PrintPageRange | QAbstractPrintDialog.PrintCurrentPage
+                   | QAbstractPrintDialog.PrintCollateCopies)
+        selected = self.sidebar.selected_rows() if self.sidebar_dock.isVisible() else []
+        if len(selected) > 1:
+            options |= QAbstractPrintDialog.PrintSelection  # the pages picked in the sidebar
+        dialog.setOptions(options)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        self.print_to(printer, self.pages_to_print(printer, selected))
+
+    def pages_to_print(self, printer: QPrinter, selected: list[int]) -> list[int]:
+        count = self.view.document.page_count
+        which = printer.printRange()
+        if which == QPrinter.PageRange:
+            pages = list(range(max(printer.fromPage(), 1) - 1, min(printer.toPage(), count)))
+        elif which == QPrinter.CurrentPage:
+            pages = [self.view.current_page]
+        elif which == QPrinter.Selection and selected:
+            pages = sorted(selected)
+        else:
+            pages = list(range(count))
+        copies = printer.copyCount()
+        if copies > 1 and not printer.supportsMultipleCopies():
+            # The driver can't do copies itself; send them as extra sheets.
+            printer.setCopyCount(1)
+            pages = pages * copies if printer.collateCopies() \
+                else [p for p in pages for _ in range(copies)]
+        return pages
+
+    def print_to(self, printer: QPrinter, pages: list[int]) -> None:
+        progress = QProgressDialog("Printing…", "Cancel", 0, len(pages), self)
+        progress.setWindowTitle("Print")
+        progress.setWindowModality(Qt.WindowModal)  # the document can't change mid-job
+        progress.setMinimumDuration(400)
+
+        def tick(n: int) -> bool:
+            progress.setValue(n)
+            progress.setLabelText(f"Printing page {n + 1} of {len(pages)}…")
+            QApplication.processEvents()
+            return not progress.wasCanceled()
+
+        try:
+            failures = print_pages(self.view.renderer, printer, pages, tick)
+        except PrintError as exc:
+            progress.close()
+            QMessageBox.critical(self, "Print", str(exc))
+            return
+        canceled = progress.wasCanceled()
+        progress.close()
+        if failures:
+            listed = "\n".join(f"Page {i + 1}: {err}" for i, err in failures[:10])
+            QMessageBox.warning(self, "Print", "These pages could not be printed "
+                                f"(their sheets say so):\n\n{listed}")
+        elif canceled:
+            self.statusBar().showMessage("Printing cancelled", 5000)
+        else:
+            where = printer.printerName() or printer.outputFileName()
+            self.statusBar().showMessage(
+                f"Sent {len(pages)} page{'s' if len(pages) != 1 else ''} to {where}", 8000)
 
     # ---- page edits ----------------------------------------------------
 

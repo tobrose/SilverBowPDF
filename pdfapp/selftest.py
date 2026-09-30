@@ -94,6 +94,28 @@ def run(log_path: Optional[str] = None) -> int:
                 raise RuntimeError("page rendered blank")
             return f"{image.width()}x{image.height()}, content visible"
 
+    def printing() -> str:
+        # Prints to a PDF file (no paper), which runs the whole path: Qt's
+        # print support bundled, pdfium's print render, the sheet layout.
+        from PySide6.QtPrintSupport import QPrinter, QPrinterInfo
+        from .document import PdfDocument
+        from .printing import print_pages
+        from .rendering import PageRenderer
+        out = work / "printed.pdf"
+        printer = QPrinter(QPrinter.HighResolution)
+        printer.setOutputFormat(QPrinter.PdfFormat)
+        printer.setOutputFileName(str(out))
+        with PdfDocument(work / "plain.pdf") as doc:
+            failures = print_pages(PageRenderer(doc, max_pages=0), printer, [0, 1])
+        if failures:
+            raise RuntimeError(f"pages failed to print: {failures}")
+        with PdfDocument(out) as printed:
+            if printed.page_count != 2:
+                raise RuntimeError(f"printed {printed.page_count} sheets, expected 2")
+        names = [p.printerName() for p in QPrinterInfo.availablePrinters()]
+        default = QPrinterInfo.defaultPrinterName() or "none"
+        return f"2 sheets to PDF; {len(names)} printer(s) visible, default: {default}"
+
     def edit_and_save() -> str:
         from .document import PdfDocument
         from .writer import commit, write_pdf
@@ -133,6 +155,7 @@ def run(log_path: Optional[str] = None) -> int:
         step("window icon", icon)
         step("create test PDFs (pikepdf)", make_pdfs)
         step("render a page (pdfium -> QImage)", render)
+        step("print (to a PDF file)", printing)
         step("edit, merge, save, reopen", edit_and_save)
         step("open encrypted file", encrypted)
 

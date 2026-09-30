@@ -108,7 +108,21 @@ class PageRenderer:
             self._cache.move_to_end(key)
             return cached
 
-        bitmap = self.document.render_bitmap(index, scale, view_rotation, self._overlay(index))
+        image = self._render(index, scale, view_rotation, for_print=False)
+        self._cache[key] = image
+        while len(self._cache) > self.max_pages:
+            self._cache.popitem(last=False)
+        return image
+
+    def print_image(self, index: int, scale: float) -> QImage:
+        """The page as it prints: every edit the screen shows (pages, marks,
+        filled fields, unsaved or not), minus the form-field tint. Never
+        cached -- a print job's pages are big and seen once."""
+        return self._render(index, scale, 0, for_print=True)
+
+    def _render(self, index: int, scale: float, view_rotation: int, for_print: bool) -> QImage:
+        bitmap = self.document.render_bitmap(index, scale, view_rotation, self._overlay(index),
+                                             for_print=for_print)
         try:
             image = bitmap_to_qimage(bitmap)
         finally:
@@ -123,10 +137,6 @@ class PageRenderer:
                 f"but PageTransform predicted {expected[0]}x{expected[1]}. "
                 f"Coordinate mapping cannot be trusted."
             )
-
-        self._cache[key] = image
-        while len(self._cache) > self.max_pages:
-            self._cache.popitem(last=False)
         return image
 
     def cached(self, index: int, scale: float, view_rotation: int = 0) -> Optional[QImage]:

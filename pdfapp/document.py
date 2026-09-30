@@ -539,8 +539,12 @@ class PdfDocument:
     # ---- rendering ------------------------------------------------------
 
     def render_bitmap(self, index: int, scale: float, view_rotation: int = 0,
-                      overlay: Optional[bytes] = None):
+                      overlay: Optional[bytes] = None, for_print: bool = False):
         """Render a page and return the raw pdfium bitmap.
+
+        for_print: as printed rather than as shown -- pdfium's printing mode
+        (annotations flagged not to print are left out, NoView ones drawn)
+        and without the on-screen tint that marks form fields.
 
         Caller owns the bitmap and must close it. Use PageRenderer instead
         unless you have a reason not to.
@@ -556,19 +560,37 @@ class PdfDocument:
         """
         page = self._page(index)
         source = self._source(index)
+        if not for_print:
+            return self._render(page, source, index, scale, view_rotation, overlay, 0)
+        # The field tint is a setting on the document's form engine, shared
+        # by every page: off for exactly this render, back on after.
+        tint = source.has_forms and source.pdf.formenv
+        if tint:
+            pdfium_c.FPDF_SetFormFieldHighlightAlpha(source.pdf.formenv, 0)
+        try:
+            return self._render(page, source, index, scale, view_rotation, overlay,
+                                pdfium_c.FPDF_PRINTING)
+        finally:
+            if tint:
+                pdfium_c.FPDF_SetFormFieldHighlightAlpha(source.pdf.formenv, FIELD_HIGHLIGHT_ALPHA)
+
+    def _render(self, page, source, index, scale, view_rotation, overlay, extra_flags: int):
         # pdfium applies the intrinsic /Rotate itself; we add the edit
         # rotation on top, exactly as saving it into /Rotate would.
         rotation = (self._pages[index].rotation + view_rotation) % 360
+        printing = bool(extra_flags & pdfium_c.FPDF_PRINTING)
         if overlay is None:
             return page.render(
                 scale=scale,
                 rotation=rotation,
                 may_draw_forms=source.has_forms,
                 prefer_bgrx=True,  # 32-bit aligned rows blit faster into Qt
+                extra_flags=extra_flags,
             )
 
         bitmap = page.render(scale=scale, rotation=rotation, draw_annots=False,
-                             may_draw_forms=False, prefer_bgrx=True)
+                             may_draw_forms=False, prefer_bgrx=True, extra_flags=extra_flags)
+        flags = pdfium_c.FPDF_ANNOT | extra_flags
         # Exactly the placement page.render used (no crop): origin, full
         # size, rotation as a quarter-turn count.
         placement = (0, 0, bitmap.width, bitmap.height, rotation // 90)
@@ -579,21 +601,20 @@ class PdfDocument:
                 # widgets with the new values; its form engine draws them.
                 overlay_doc.init_forms()
                 pdfium_c.FPDF_SetFormFieldHighlightColor(overlay_doc.formenv, 0, FIELD_HIGHLIGHT)
-                pdfium_c.FPDF_SetFormFieldHighlightAlpha(overlay_doc.formenv, FIELD_HIGHLIGHT_ALPHA)
+                pdfium_c.FPDF_SetFormFieldHighlightAlpha(
+                    overlay_doc.formenv, 0 if printing else FIELD_HIGHLIGHT_ALPHA)
                 form_page = overlay_doc[0]
                 try:
-                    pdfium_c.FPDF_FFLDraw(overlay_doc.formenv, bitmap, form_page, *placement,
-                                          pdfium_c.FPDF_ANNOT)
+                    pdfium_c.FPDF_FFLDraw(overlay_doc.formenv, bitmap, form_page, *placement, flags)
                 finally:
                     form_page.close()
             else:
                 formenv = getattr(page, "formenv", None)
                 if source.has_forms and formenv:
-                    pdfium_c.FPDF_FFLDraw(formenv, bitmap, page, *placement, pdfium_c.FPDF_ANNOT)
+                    pdfium_c.FPDF_FFLDraw(formenv, bitmap, page, *placement, flags)
             overlay_page = overlay_doc[len(overlay_doc) - 1]
             try:
-                pdfium_c.FPDF_RenderPageBitmap(bitmap, overlay_page, *placement,
-                                               pdfium_c.FPDF_ANNOT)
+                pdfium_c.FPDF_RenderPageBitmap(bitmap, overlay_page, *placement, flags)
             finally:
                 overlay_page.close()
         finally:
