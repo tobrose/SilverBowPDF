@@ -321,6 +321,9 @@ class MainWindow(QMainWindow):
         self.letter_actions = {act: act.shortcut() for act in self.tool_actions.values()
                                if act.shortcut().count() == 1
                                and len(act.shortcut().toString()) == 1}
+        self.act_ocr = QAction("&Recognize Text (OCR)…", self,
+                               toolTip="Make scanned pages searchable and selectable",
+                               triggered=lambda: self.recognize_text())
         self.act_letter_shortcuts = QAction("Single-Letter Tool Shortcuts", self, checkable=True,
                                             triggered=self._toggle_letter_shortcuts)
 
@@ -439,6 +442,8 @@ class MainWindow(QMainWindow):
         tools_menu.addMenu(self.annotate_menu)
         tools_menu.addMenu(self.form_menu)
         tools_menu.addSeparator()
+        tools_menu.addAction(self.act_ocr)
+        tools_menu.addSeparator()
         tools_menu.addAction(self.act_letter_shortcuts)
 
         view_menu = self.menuBar().addMenu("&View")
@@ -477,7 +482,7 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.status_right)
 
     def _set_document_actions_enabled(self, enabled: bool) -> None:
-        for act in (self.act_close, self.act_save_as, self.act_print, self.act_zoom_in,
+        for act in (self.act_close, self.act_save_as, self.act_print, self.act_ocr, self.act_zoom_in,
                     self.act_zoom_out,
                     self.act_zoom_100, self.act_fit_width, self.act_fit_page,
                     self.act_page_rot_ccw,
@@ -620,6 +625,76 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 f"Sent {len(pages)} page{'s' if len(pages) != 1 else ''} to {where}", 8000)
 
+    # ---- OCR -----------------------------------------------------------
+
+    def recognize_text(self, pages: Optional[list[int]] = None) -> None:
+        """Windows OCR on the scanned pages among `pages` (default: the
+        sidebar selection if it's several pages, else the whole document).
+        One undoable edit; saved into the file like any other."""
+        doc = self.view.document
+        if doc is None or self.history is None:
+            return
+        self.view.commit_text_edit()
+        self.view.commit_field_edit()
+        from . import ocr  # winrt loads here, not at startup
+        try:
+            language = ocr.language()
+        except ocr.OcrUnavailable as exc:
+            QMessageBox.warning(self, "Recognize Text", str(exc))
+            return
+        if pages is None:
+            selected = self.sidebar.selected_rows() if self.sidebar_dock.isVisible() else []
+            pages = selected if len(selected) > 1 else list(range(doc.page_count))
+        todo = [i for i in sorted(pages) if ocr.needs_ocr(doc, i)]
+        if not todo:
+            QMessageBox.information(
+                self, "Recognize Text",
+                "These pages already have text, so there's nothing to recognise. "
+                "(OCR is for scanned pages -- ones that are just a picture.)")
+            return
+
+        progress = QProgressDialog("Recognizing text…", "Cancel", 0, len(todo), self)
+        progress.setWindowTitle("Recognize Text")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(300)
+
+        def tick(n: int) -> bool:
+            progress.setValue(n)
+            progress.setLabelText(f"Recognizing page {todo[n] + 1} ({n + 1} of {len(todo)})…")
+            QApplication.processEvents()
+            return not progress.wasCanceled()
+
+        try:
+            found, failures = ocr.recognize(doc, todo, tick)
+        except ocr.OcrUnavailable as exc:
+            progress.close()
+            QMessageBox.warning(self, "Recognize Text", str(exc))
+            return
+        progress.close()
+        empty = [doc.page_key(i) for i in todo if doc.page_key(i) in found
+                 and not found[doc.page_key(i)]]
+        found = {k: v for k, v in found.items() if v}  # nothing read: nothing to add
+        if found:
+            current = self.history.current
+            state = replace(current, ocr=current.ocr.with_pages(found))
+            self.history.push(state, "Recognize Text")
+            self._show_state(state, self.view.current_page)
+        skipped = len(pages) - len(todo)
+        parts = [f"Recognised text on {len(found)} page{'s' if len(found) != 1 else ''} "
+                 f"({language})."]
+        if empty:
+            parts.append(f"{len(empty)} page{'s' if len(empty) != 1 else ''} had no readable text.")
+        if skipped:
+            parts.append(f"{skipped} already had text.")
+        if found:
+            parts.append("Save to keep it; Ctrl+Z undoes it.")
+        if failures:
+            listed = "\n".join(f"Page {i + 1}: {err}" for i, err in failures[:10])
+            QMessageBox.warning(self, "Recognize Text",
+                                " ".join(parts) + f"\n\nThese pages failed:\n\n{listed}")
+        else:
+            self.statusBar().showMessage(" ".join(parts), 12000)
+
     # ---- page edits ----------------------------------------------------
 
     def _targets(self) -> list[int]:
@@ -652,10 +727,14 @@ class MainWindow(QMainWindow):
                     select: Optional[list[int]] = None) -> None:
         doc = self.view.document
         pages_changed = state.pages != doc.pages
+        text_changed = state.ocr != doc.ocr
         doc.pages = state.pages
         doc.annots = state.annots
         doc.fields = state.fields
         doc.forms = state.forms
+        doc.ocr = state.ocr
+        if text_changed:
+            self.view.text_changed()
         if pages_changed:
             current = max(0, min(len(state.pages) - 1, current))
             self.sidebar.set_document(doc)
@@ -966,6 +1045,8 @@ class MainWindow(QMainWindow):
         menu.addAction(f"Rotate {what} Left", lambda: self.rotate_pages(indices, -90))
         menu.addAction(f"Rotate {what} Right", lambda: self.rotate_pages(indices, 90))
         menu.addSeparator()
+        menu.addAction(f"Recognize Text on {what}", lambda: self.recognize_text(indices))
+        menu.addSeparator()
         menu.addAction("Move Earlier",
                        lambda: self.move_pages_by(indices, -1)).setEnabled(min(indices) > 0)
         menu.addAction("Move Later", lambda: self.move_pages_by(indices, +1)).setEnabled(
@@ -1118,7 +1199,8 @@ class MainWindow(QMainWindow):
         while True:
             try:
                 return write_pdf(doc.sources, pages, dest, allow_decrypt=allowed,
-                                 annots=doc.annots, fields=doc.fields, forms=doc.forms), allowed
+                                 annots=doc.annots, fields=doc.fields, forms=doc.forms,
+                                 ocr=doc.ocr), allowed
             except EncryptionWouldBeLost as exc:
                 if exc.file == 0 and self._same_file(dest, doc.path):
                     QMessageBox.warning(
@@ -1153,8 +1235,8 @@ class MainWindow(QMainWindow):
     def _save_to(self, dest: Path) -> bool:
         """Write, swap in, reopen."""
         doc = self.view.document
-        pages, annots, fields, forms = doc.pages, doc.annots, doc.fields, doc.forms
-        written = self._write(pages, dest, "Save failed")
+        edits = DocState(doc.pages, doc.annots, doc.fields, doc.forms, doc.ocr)
+        written = self._write(edits.pages, dest, "Save failed")
         if written is None:
             return False
         tmp, allowed = written
@@ -1169,7 +1251,7 @@ class MainWindow(QMainWindow):
             commit(tmp, dest)
         except SaveError as exc:
             if overwriting:
-                self._reopen(sources, keep_edits=DocState(pages, annots, fields, forms))
+                self._reopen(sources, keep_edits=edits)
             QMessageBox.critical(self, "Save failed", f"{exc}\n\nThe original file is unchanged.")
             return False
 
@@ -1199,6 +1281,7 @@ class MainWindow(QMainWindow):
                 document.annots = keep_edits.annots
                 document.fields = keep_edits.fields
                 document.forms = keep_edits.forms
+                document.ocr = keep_edits.ocr
         except Exception:
             document.close()
             raise
@@ -1234,6 +1317,10 @@ class MainWindow(QMainWindow):
                      "(same as Chrome/Edge) -- open it in Acrobat")
         self.status_left.setText(f"{document.path}{forms}")
         self._set_document_actions_enabled(True)
+        if not any(document.has_text(i) for i in range(min(3, document.page_count))):
+            self.statusBar().showMessage(
+                "This PDF looks scanned (its pages are pictures, with no text). "
+                "Tools > Recognize Text (OCR) makes it searchable.", 15000)
 
     def _refresh_page_count(self) -> None:
         doc = self.view.document

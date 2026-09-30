@@ -11,7 +11,7 @@
 import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
 
 PROJECT_ROOT = Path(SPECPATH).parent  # noqa: F821 -- SPECPATH is injected
 
@@ -35,6 +35,14 @@ binaries += collect_dynamic_libs("pypdfium2_raw")
 # Window/taskbar icon, read at runtime from beside pdfapp/__init__ (see
 # pdfapp.ICON_FILE). The exe's own icon is packaging/icon.ico, below.
 datas += [(str(PROJECT_ROOT / "pdfapp" / "icon.png"), "pdfapp")]
+
+# --- winrt (Windows OCR) -----------------------------------------------------
+# ocr.py imports winrt lazily, and the compiled _winrt_* modules import each
+# other's Python wrappers from C (the OCR module needs Foundation's to await
+# anything), which the analysis can't see. Take the whole (small, ~3MB)
+# namespace, plus the msvcp140.dll it ships beside them.
+winrt_modules = collect_submodules("winrt")
+binaries += collect_dynamic_libs("winrt")
 
 # --- pikepdf ---------------------------------------------------------------
 # Native _core extension plus the qpdf runtime it links against.
@@ -84,7 +92,7 @@ a = Analysis(  # noqa: F821
     pathex=[str(PROJECT_ROOT)],
     binaries=binaries,
     datas=datas,
-    hiddenimports=["pdfapp", "pypdfium2_raw"],
+    hiddenimports=["pdfapp", "pypdfium2_raw", *winrt_modules],
     hookspath=[],
     runtime_hooks=[],
     excludes=EXCLUDED_QT + EXCLUDED_OTHER,

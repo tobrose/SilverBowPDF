@@ -83,6 +83,7 @@ class FindBar(QWidget):
         # Indices change when pages are edited or another file is opened;
         # rescan quietly -- highlights only, no jumping the view around.
         view.pages_rebuilt.connect(lambda: QTimer.singleShot(0, self._rescan))
+        view.text_layer_changed.connect(lambda: QTimer.singleShot(0, self._rescan))
         self.hide()
 
     # ---- opening and closing -------------------------------------------

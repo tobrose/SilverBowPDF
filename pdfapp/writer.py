@@ -29,6 +29,8 @@ from .annotpdf import apply_edits
 from .annots import AnnotEdits
 from .fields import FieldEdits, FormEdits
 from .formpdf import apply_field_edits, apply_form_edits
+from .ocrlayer import FONT_DESCRIPTOR, FONT_NAME, GLYPH_WIDTH, TO_UNICODE, OcrEdits, OcrWord
+from .ocrlayer import content as ocr_content
 from .pagelist import PageList
 
 
@@ -68,6 +70,7 @@ def write_pdf(
     annots: AnnotEdits = AnnotEdits(),
     fields: FieldEdits = FieldEdits(),
     forms: FormEdits = FormEdits(),
+    ocr: OcrEdits = OcrEdits(),
 ) -> Path:
     """Build the edited PDF into a temp file beside `dest` and return its path.
 
@@ -83,6 +86,7 @@ def write_pdf(
     fields: filled-in form values per (file, field name); see fields.py.
     forms: form structure per (file, source page): fields added, moved,
         resized, renamed, deleted; see fields.FormEdits.
+    ocr: recognised text layers per (file, source page); see ocrlayer.py.
     """
     dest = Path(dest)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{dest.stem}.", suffix=".tmp", dir=dest.parent)
@@ -164,6 +168,7 @@ def write_pdf(
                 base.pages.append(page)
             if [p.obj.objgen for p in base.pages] != [p.obj.objgen for p in expected]:
                 raise SaveError("page reorder did not preserve page identity")
+            ocr_font = None
             for page, ref in zip(base.pages, pages):
                 if ref.rotation:
                     page.rotate(ref.rotation, relative=True)
@@ -172,6 +177,11 @@ def write_pdf(
                 edits = annots.get((ref.file, ref.source))
                 if edits is not None:
                     apply_edits(base, page.obj, edits)
+                words = ocr.get((ref.file, ref.source))
+                if words:
+                    if ocr_font is None:
+                        ocr_font = _ocr_font(base)
+                    _add_text_layer(base, page, words, ocr_font)
 
             _import_outlines(base, pdfs, sources, foreign_origin)
 
@@ -365,6 +375,35 @@ def _import_outlines(
         folder.children.extend(imported)
         with base.open_outline() as outline:
             outline.root.append(folder)
+
+
+def _add_text_layer(pdf: pikepdf.Pdf, page: pikepdf.Page, words: Sequence[OcrWord],
+                    font: pikepdf.Object) -> None:
+    """Draw recognised words invisibly over the page (ocrlayer.py), after
+    its own content. That content is wrapped in q/Q first: a scan's stream
+    that leaves its transformation matrix changed would otherwise move every
+    word away from its ink."""
+    name = page.add_resource(font, pikepdf.Name.Font, prefix="OCR")
+    page.contents_add(pdf.make_stream(b"q\n"), prepend=True)
+    page.contents_add(pdf.make_stream(b"\nQ\n" + ocr_content(words, str(name).lstrip("/"))))
+
+
+def _ocr_font(pdf: pikepdf.Pdf) -> pikepdf.Object:
+    """The glyphless text-layer font (ocrlayer.py); one per saved file."""
+    N = pikepdf.Name
+    descriptor = pikepdf.Dictionary({
+        k: (N(v) if isinstance(v, str) else pikepdf.Array(v) if isinstance(v, list) else v)
+        for k, v in FONT_DESCRIPTOR.items()})
+    cid_font = pikepdf.Dictionary(
+        Type=N.Font, Subtype=N.CIDFontType2, BaseFont=N("/" + FONT_NAME),
+        CIDSystemInfo=pikepdf.Dictionary(Registry=pikepdf.String("Adobe"),
+                                         Ordering=pikepdf.String("Identity"), Supplement=0),
+        FontDescriptor=pdf.make_indirect(descriptor), DW=GLYPH_WIDTH, CIDToGIDMap=N.Identity)
+    font = pdf.make_indirect(pikepdf.Dictionary(
+        Type=N.Font, Subtype=N.Type0, BaseFont=N("/" + FONT_NAME), Encoding=N("/Identity-H"),
+        DescendantFonts=pikepdf.Array([pdf.make_indirect(cid_font)]),
+        ToUnicode=pdf.make_stream(TO_UNICODE)))
+    return font
 
 
 def prune_dangling(pdf: pikepdf.Pdf) -> None:

@@ -46,6 +46,16 @@ pdfapp/
                  select/move/delete. Emits edit requests; never edits.
                  No view rotation in the UI (removed, user's call); the
                  view_rotation plumbing under it stays, always 0.
+  ocrlayer.py    OCR text layer as data (OcrWord, OcrEdits) + the invisible-text
+                 content/font and a hand-written one-page PDF for the preview.
+                 No libs. Words are text matrices over a glyphless Identity-H
+                 font (0.5em x 1em glyphs, ToUnicode identity).
+  ocr.py         Windows.Media.Ocr via winrt (lazy import). Renders page
+                 content only (no annots/fields), 300 DPI, maps word boxes
+                 back through PageTransform.bitmap_to_pdf. Only pages with no
+                 text at all (has_text) are recognised. Loads QtCore before
+                 winrt ON PURPOSE: winrt ships an older msvcp140 (14.29) and
+                 loading it first makes Qt (14.44) crash (access violation).
   findbar.py     Ctrl+F bar. Scans pages in 30ms timer slices from the current
                  page (find_text: pdfium search, throwaway text pages so a long
                  document isn't pinned in memory); the view paints the matches.
@@ -65,7 +75,9 @@ packaging/       PyInstaller spec, Inno Setup script, build script. icon.ico is 
 
 Dependency direction is one-way: `transform` <- `pagelist` <- `document` <-
 `rendering` <- `pageview`/`thumbnails`/`printing` <- `findbar` <- `mainwindow`, with `writer` depending only on
-`pagelist` and used only by `mainwindow`. Nothing lower imports anything higher.
+`pagelist` and used only by `mainwindow`. `ocrlayer` (no libs) sits beside
+`annots`; `ocr` sits on `document` and only `mainwindow`/`selftest` use it.
+Nothing lower imports anything higher.
 
 Page edits never mutate anything until save: pdfium keeps rendering the
 original file through the PageList. `tests/test_pages.py` asserts the preview
@@ -144,6 +156,8 @@ window. Follow that pattern: isolate, display, don't hide.
   `bitmap_size`). Don't add comments that restate the code.
 - No new runtime dependencies without asking. The dependency list is short on
   purpose: PySide6, pypdfium2, pikepdf. Each one is ~50-200MB in the installer.
+  Plus the winrt-* packages (Windows OCR bridge, ~3MB; user chose Windows'
+  built-in OCR 2026-09-29 -- the engine itself ships with Windows 11).
 - Rendering is read-only via pdfium. Document mutation goes through pikepdf.
   Don't mix the two on one code path.
 
@@ -241,6 +255,16 @@ Rotate View (left/right, Ctrl+L/R) was removed (user's call): a turned view
 on top of turned pages confused users. Page rotation (sidebar, Pages menu)
 is the only rotation.
 
+OCR (Tools > Recognize Text, or right-click pages): Windows' own engine on
+the pages with no text (sidebar selection if several, else all). One
+undoable edit, OcrEdits in DocState; before saving, document._text reads
+those pages from the recognised layer (ocrlayer.text_layer_pdf in pdfium),
+so search/select/highlight work at once; the writer draws the same words
+invisibly after the page's content (wrapped in q/Q). tests/test_ocr.py
+asserts preview text boxes == saved within 0.5pt and pixels unchanged.
+Opening a PDF whose first pages have no text shows a status-bar hint.
+The self-test runs OCR (says so if the Windows install has no language).
+
 Print (Ctrl+P, toolbar, File menu): Windows print dialog -- all, a range,
 current page, or the sidebar selection; copies (sent as extra sheets if
 the driver can't); progress with Cancel. A page that fails to render gets
@@ -264,10 +288,7 @@ HKLM\Software\Policies\SilverbowPDF\SingleKeyShortcuts locks it either way
 (settings.py; installer task lockletterkeys). Ctrl shortcuts always on.
 Tests pass INI-backed QSettings -- never touch the real registry.
 
-Next, in order (user chose all of these): shapes, ink, stamps;
-authoring fillable form fields; form filling; encryption; OCR for scanned
-pages (user confirmed it's required; engine not chosen -- weigh machine-image
-size/CPU/Windows Server support and ask before adding a dependency).
+Next: encryption (re-encrypting on save; see Known limits).
 
 Deployment target is shared multi-session desktops: no GPU, non-persistent
 profiles, pixels re-encoded over a remote-display protocol. Keep memory and repaints lean; don't
@@ -283,7 +304,12 @@ count on per-user settings surviving logoff.
 - XFA (LiveCycle) forms: pdfium can't show their fields; the status bar
   says so. Converting XFA isn't planned.
 - Find doesn't match a phrase broken across two lines (pdfium's text has a
-  line break there), and finds nothing on scanned pages until OCR exists.
+  line break there). Scanned pages need Recognize Text first.
+- OCR: pages with ANY text are skipped (a second invisible copy would double
+  every search hit); a page that's part scan, part text gets nothing. Skewed
+  scans: the engine's text angle is ignored, so words on a tilted line are
+  boxed level. Languages are whatever Windows has for the user. Characters
+  outside Unicode's BMP are dropped from the layer.
 
 - Save resets undo history. The saved file becomes the new source, and old
   PageList snapshots index into the previous file.

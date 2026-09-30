@@ -12,6 +12,7 @@ import pypdfium2.raw as pdfium_c
 
 from .annots import MARKUP_KINDS, Annot, AnnotEdits, PageKey, is_editable
 from .fields import CHECKBOX, COMBO, RADIO, TEXT, FieldEdits, FormEdits, Widget
+from .ocrlayer import OcrEdits, text_layer_pdf
 from .pagelist import PageList, PageRef
 from .textlayout import parse_da
 from .transform import PageTransform, normalize_rotation
@@ -114,6 +115,8 @@ class PdfDocument:
         self._forms = FormEdits()
         self._file_annots: Dict[PageKey, Tuple[Annot, ...]] = {}
         self._widgets: Dict[PageKey, Tuple[Widget, ...]] = {}
+        self._ocr = OcrEdits()
+        self._ocr_pages: Dict[PageKey, tuple] = {}  # key -> (words, _PageText, page, pdf)
         self._closed = False
 
     # ---- lifecycle -----------------------------------------------------
@@ -122,6 +125,8 @@ class PdfDocument:
         if self._closed:
             return
         self._closed = True
+        for key in list(self._ocr_pages):
+            self._close_ocr_page(key)
         for source in self._sources:
             for text in source.text_cache.values():
                 text.textpage.close()
@@ -326,6 +331,9 @@ class PdfDocument:
         if self._closed:
             raise DocumentError("document is closed")
         ref = self._pages[index]
+        words = self._ocr.get((ref.file, ref.source))
+        if words is not None:
+            return self._ocr_text(index, words)
         source = self._sources[ref.file]
         text = source.text_cache.get(ref.source)
         if text is None:
@@ -334,6 +342,68 @@ class PdfDocument:
             text = _PageText(textpage, boxes)
             source.text_cache[ref.source] = text
         return text
+
+    def _ocr_text(self, index: int, words) -> _PageText:
+        """A page with a recognised but unsaved text layer reads its text from
+        that layer alone, built into a one-page PDF with the page's geometry
+        (ocrlayer.text_layer_pdf) -- the same text, at the same places, that
+        saving writes into the page. OCR only runs on pages with no text, so
+        nothing of the page's own is hidden by this."""
+        key = self.page_key(index)
+        held = self._ocr_pages.get(key)
+        if held is not None and held[0] == words:
+            return held[1]
+        if held is not None:
+            self._close_ocr_page(key)
+        media, crop, rotate = self.page_geometry(index)
+        pdf = pdfium.PdfDocument(text_layer_pdf(words, media, crop, rotate))
+        page = pdf[0]
+        textpage = page.get_textpage()
+        boxes = [textpage.get_charbox(i, loose=True) for i in range(textpage.count_chars())]
+        text = _PageText(textpage, boxes)
+        self._ocr_pages[key] = (words, text, page, pdf)
+        return text
+
+    def _close_ocr_page(self, key: PageKey) -> None:
+        _, text, page, pdf = self._ocr_pages.pop(key)
+        text.textpage.close()
+        page.close()
+        pdf.close()
+
+    @property
+    def ocr(self) -> OcrEdits:
+        return self._ocr
+
+    @ocr.setter
+    def ocr(self, ocr: OcrEdits) -> None:
+        self._ocr = ocr
+        for key in [k for k, held in self._ocr_pages.items() if ocr.get(k) != held[0]]:
+            self._close_ocr_page(key)  # undone, or recognised again
+
+    def has_text(self, index: int) -> bool:
+        """Any text on the page (its own, or a recognised layer)? Checked
+        with a throwaway text page, like find_text, so asking it of every
+        page of a long document doesn't keep all their text in memory."""
+        if self._closed:
+            raise DocumentError("document is closed")
+        ref = self._pages[index]
+        if self._ocr.get((ref.file, ref.source)) is not None:
+            return True
+        source = self._sources[ref.file]
+        cached = source.text_cache.get(ref.source)
+        if cached is not None:
+            return bool(cached.boxes)
+        page = source.page_cache.get(ref.source)
+        own_page = page is None
+        if own_page:
+            page = source.pdf[ref.source]
+        textpage = page.get_textpage()
+        try:
+            return textpage.count_chars() > 0
+        finally:
+            textpage.close()
+            if own_page:
+                page.close()
 
     def char_count(self, index: int) -> int:
         return len(self._text(index).boxes)
@@ -405,6 +475,8 @@ class PdfDocument:
         ref = self._pages[index]
         source = self._sources[ref.file]
         cached = source.text_cache.get(ref.source)
+        if self._ocr.get((ref.file, ref.source)) is not None:
+            cached = self._text(index)  # the recognised layer; small, kept anyway
         page = textpage = None
         own_page = False
         if cached is not None:
@@ -537,6 +609,14 @@ class PdfDocument:
         return tallest
 
     # ---- rendering ------------------------------------------------------
+
+    def render_content(self, index: int, scale: float):
+        """Just the page's own content -- no annotations, no form fields --
+        as shown (edit rotation included). What OCR reads: a stamp or a
+        note on top of a scan isn't part of its text. Caller closes it."""
+        rotation = self._pages[index].rotation % 360
+        return self._page(index).render(scale=scale, rotation=rotation, draw_annots=False,
+                                        may_draw_forms=False, prefer_bgrx=True)
 
     def render_bitmap(self, index: int, scale: float, view_rotation: int = 0,
                       overlay: Optional[bytes] = None, for_print: bool = False):

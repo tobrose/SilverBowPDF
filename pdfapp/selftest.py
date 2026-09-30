@@ -116,6 +116,19 @@ def run(log_path: Optional[str] = None) -> int:
         default = QPrinterInfo.defaultPrinterName() or "none"
         return f"2 sheets to PDF; {len(names)} printer(s) visible, default: {default}"
 
+    def recognize() -> str:
+        # Windows' OCR through the bundled winrt bridge, on a rendered page.
+        # Fails if the bridge didn't bundle -- or if this Windows has no OCR
+        # language, which in a machine image is worth knowing before users do.
+        from . import ocr
+        from .document import PdfDocument
+        with PdfDocument(work / "plain.pdf") as doc:
+            words = ocr.recognize_page(doc, 0)
+        text = "".join(w.text for w in words)
+        if "Page 1" not in text:
+            raise RuntimeError(f"expected 'Page 1', read {text!r}")
+        return f"read {text!r} ({ocr.language()})"
+
     def edit_and_save() -> str:
         from .document import PdfDocument
         from .writer import commit, write_pdf
@@ -156,6 +169,7 @@ def run(log_path: Optional[str] = None) -> int:
         step("create test PDFs (pikepdf)", make_pdfs)
         step("render a page (pdfium -> QImage)", render)
         step("print (to a PDF file)", printing)
+        step("OCR (Windows)", recognize)
         step("edit, merge, save, reopen", edit_and_save)
         step("open encrypted file", encrypted)
 

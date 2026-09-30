@@ -424,6 +424,7 @@ class PdfView(QScrollArea):
     pages_rebuilt = Signal()                   # displayed indices may now mean other pages
     highlight_color_changed = Signal(object)   # picked on the mark bar
     text_style_changed = Signal()              # text_size / text_color, picked on the style bar
+    text_layer_changed = Signal()              # pages gained or lost recognised (OCR) text
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -673,6 +674,12 @@ class PdfView(QScrollArea):
                     if annot.ident == ident:
                         return page.index, annot
         return None
+
+    def text_changed(self) -> None:
+        """Recognised text was added or undone: the text layer's character
+        indices are new, so a selection in the old ones means nothing."""
+        self.clear_text_selection()
+        self.text_layer_changed.emit()
 
     def annots_changed(self) -> None:
         """Annotation edits changed (edit, undo, redo). Sizes don't change,

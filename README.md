@@ -57,6 +57,7 @@ on a headless box.
 | Double-click an annotation | Edit its comment |
 | `PgUp` `PgDn` `Ctrl+Home` `Ctrl+End` `Ctrl+G` | Navigation |
 | `Ctrl` + scroll | Zoom at cursor |
+| Tools > Recognize Text (OCR) | Make scanned pages searchable and selectable (Windows' own OCR); save to keep it |
 | `Ctrl+F` | Find text; `Enter` / `F3` next, `Shift+Enter` / `Shift+F3` previous, `Esc` closes |
 | Pan button, or drag with the middle mouse button | Drag the page to scroll; `Esc` back to Select |
 
