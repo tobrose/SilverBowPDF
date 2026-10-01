@@ -16,7 +16,7 @@ from typing import Callable, List, Optional, Sequence, Tuple
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter
-from PySide6.QtPrintSupport import QPrinter
+from PySide6.QtPrintSupport import QPrinter, QPrinterInfo
 
 from .rendering import PageRenderer
 
@@ -26,6 +26,14 @@ LOW_RES_DPI = 150  # for documents whose author allows low-resolution printing o
 
 class PrintError(RuntimeError):
     pass
+
+
+def available_printers() -> List[str]:
+    return [p.printerName() for p in QPrinterInfo.availablePrinters()]
+
+
+def default_printer() -> str:
+    return QPrinterInfo.defaultPrinterName()
 
 
 def place_on_sheet(page_w: float, page_h: float, area_w: float, area_h: float

@@ -156,6 +156,129 @@ def test_dialog_page_ranges():
             w.close()
 
 
+class _Patched:
+    """Swap names in mainwindow's module for one test (Windows' print dialog
+    would block, and this machine's printers aren't the users')."""
+
+    def __init__(self, **names):
+        import pdfapp.mainwindow as mw
+        self.mw, self.names, self.saved = mw, names, {}
+
+    def __enter__(self):
+        for k, v in self.names.items():
+            self.saved[k] = getattr(self.mw, k)
+            setattr(self.mw, k, v)
+
+    def __exit__(self, *exc):
+        for k, v in self.saved.items():
+            setattr(self.mw, k, v)
+
+
+def _fake_dialog(accept: bool, seen: list):
+    """Stands in for Windows' print dialog: records the printer it was
+    given, then OK or Cancel."""
+    from PySide6.QtWidgets import QDialog
+
+    class Fake:
+        def __init__(self, printer, parent):
+            self.printer = printer
+
+        def setMinMax(self, *a): pass
+        def setOptions(self, *a): pass
+
+        def exec(self):
+            seen.append((self.printer.printerName(), self.printer.docName()))
+            return QDialog.Accepted if accept else QDialog.Rejected
+    return Fake
+
+
+def test_print_menu_end_to_end():
+    """File > Print as the user runs it -- the path that crashed in 0.6.0
+    (doc.title called as a method) while every lower-level test passed."""
+    from pdfapp.mainwindow import MainWindow
+    with tempfile.TemporaryDirectory() as tmp:
+        ini = lambda name: QSettings(str(Path(tmp, name)), QSettings.IniFormat)  # noqa: E731
+        w = MainWindow(Settings(ini("user.ini"), ini("policy.ini")))
+        src = Path(tmp, "a.pdf")
+        _make_annotated_pdf(src)
+        warnings, printed, seen = [], [], []
+        w.print_to = lambda printer, pages: printed.append((printer.printerName(), pages))
+
+        class Box:
+            @staticmethod
+            def warning(parent, title, text, *a):
+                warnings.append(text)
+        from pdfapp.printing import available_printers
+        real = available_printers()  # Qt only selects printers that exist
+        assert real, "this test needs at least one printer installed (any, even PDF)"
+
+        class NoDefault(QPrinter):
+            """A session with no default printer: unset until one is chosen."""
+            def __init__(self, *a):
+                super().__init__(*a)
+                self.chosen = False
+
+            def isValid(self):
+                return self.chosen
+
+            def setPrinterName(self, name):
+                self.chosen = True
+                super().setPrinterName(name)
+        try:
+            w.view.set_document(PdfDocument(src))
+            # OK in the dialog: it prints, with the job named after the file.
+            with _Patched(QPrintDialog=_fake_dialog(True, seen)):
+                w.act_print.trigger()  # the real menu action: a click, or Ctrl+P
+            assert printed and printed[0][1] == [0, 1, 2], printed
+            assert seen[-1][1] == "a.pdf", seen
+
+            # No default printer: the dialog still starts on a real one.
+            printed.clear()
+            with _Patched(QPrinter=NoDefault, default_printer=lambda: "",
+                          QPrintDialog=_fake_dialog(True, seen)):
+                w.print_dialog()
+            assert seen[-1][0] == real[0] and printed
+
+            # Cancel: nothing more.
+            printed.clear()
+            with _Patched(QPrintDialog=_fake_dialog(False, seen)):
+                w.print_dialog()
+            assert not printed
+
+            # No printers in the session: say so, don't just do nothing.
+            with _Patched(available_printers=lambda: [], QMessageBox=Box):
+                w.print_dialog()
+            assert warnings and "no printers" in warnings[0] and not printed
+        finally:
+            w.view.set_document(None)
+            w.close()
+
+
+def test_errors_in_actions_are_shown_not_lost():
+    import pdfapp.errors as errors
+    shown = []
+
+    class Box:
+        @staticmethod
+        def critical(parent, title, text):
+            shown.append(text)
+    import PySide6.QtWidgets as widgets
+    saved, widgets.QMessageBox = widgets.QMessageBox, Box
+    saved_log = errors.LOG
+    with tempfile.TemporaryDirectory() as tmp:
+        errors.LOG = Path(tmp, "errors.log")
+        try:
+            try:
+                "".title()()  # the very shape of 0.6.0's print bug
+            except TypeError:
+                errors.report(*sys.exc_info())
+            assert shown and "TypeError" in shown[0] and str(errors.LOG) in shown[0]
+            assert "Traceback" in errors.LOG.read_text(encoding="utf-8")
+        finally:
+            widgets.QMessageBox = saved
+            errors.LOG = saved_log
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

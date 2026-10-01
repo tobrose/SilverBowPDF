@@ -70,6 +70,9 @@ pdfapp/
   thumbnails.py  Page sidebar: multi-select, drag-to-reorder, lazy thumbnails.
                  Emits requests only; MainWindow makes the PageList edit.
   mainwindow.py  Menus, toolbar, status bar, drag-and-drop.
+  errors.py      sys.excepthook: an exception in any Qt slot is shown in a
+                 message box and appended to %TEMP%\SilverbowPDF-errors.log.
+                 Without it the console-less app just "does nothing".
 packaging/       PyInstaller spec, Inno Setup script, build script. icon.ico is made
                  from icon-source.png by scripts/make_icon.py (also writes
                  pdfapp/icon.png, the runtime window icon); both committed.
@@ -150,7 +153,15 @@ them shared; `_merge_forms` then registers them with /AcroForm.
 
 **7. Never silently swallow a pdfium exception.** `PageWidget.paintEvent` draws
 the error onto the failed page so one corrupt page does not take down the
-window. Follow that pattern: isolate, display, don't hide.
+window. Follow that pattern: isolate, display, don't hide. App-wide, errors.py
+shows any exception raised in a slot (0.6.0 shipped File > Print crashing on
+`doc.title()` -- a property -- and in the installed app it just did nothing).
+
+**8. Test UI features through their action, not only the engine below.**
+Print's engine was tested; the menu handler wasn't, and it was broken.
+`tests/test_search.py::test_every_menu_action_runs` triggers every QAction
+with dialogs stubbed to cancel and fails on any exception -- keep it
+passing, and give a new feature its own test that goes through its action.
 
 ## Conventions
 

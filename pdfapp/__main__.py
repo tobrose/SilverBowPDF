@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QApplication
 
 # Absolute, not relative: PyInstaller runs this file as a top-level script,
 # where ``from .mainwindow`` has no parent package and fails at launch.
-from pdfapp import ICON_FILE
+from pdfapp import ICON_FILE, errors
 from pdfapp.mainwindow import APP_NAME, MainWindow
 
 APP_USER_MODEL_ID = "SilverbowPDF.SilverbowPDF"  # also in packaging/installer.iss
@@ -34,6 +34,7 @@ def main(argv: list[str] | None = None) -> int:
     app = QApplication(argv)
     app.setApplicationName(APP_NAME)
     app.setWindowIcon(QIcon(ICON_FILE))
+    errors.install()  # an error in a menu action is shown, not lost
 
     window = MainWindow()
     window.show()

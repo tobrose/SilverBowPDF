@@ -336,6 +336,71 @@ def test_text_box_tool_is_gone():
         assert not hasattr(Tool, "TEXTBOX")
 
 
+def test_every_menu_action_runs():
+    """Every QAction in the window, triggered with a document open, as a
+    click or shortcut would. Windows' and Qt's dialogs are stand-ins that
+    cancel. An exception in an action's slot goes to sys.excepthook --
+    which in the installed app (no console) used to mean "does nothing";
+    that's how File > Print shipped broken. Caught here instead."""
+    import pdfapp.mainwindow as mw
+    from PySide6.QtGui import QAction
+    from PySide6.QtWidgets import QDialog, QFileDialog, QInputDialog, QMessageBox
+
+    class Box(QMessageBox):
+        @staticmethod
+        def warning(*a, **k): return QMessageBox.Cancel
+        critical = information = question = warning
+
+    class Files(QFileDialog):
+        @staticmethod
+        def getOpenFileName(*a, **k): return "", ""
+        @staticmethod
+        def getOpenFileNames(*a, **k): return [], ""
+        @staticmethod
+        def getSaveFileName(*a, **k): return "", ""
+
+    class Inputs(QInputDialog):
+        @staticmethod
+        def getText(*a, **k): return "", False
+        @staticmethod
+        def getMultiLineText(*a, **k): return "", False
+        @staticmethod
+        def getInt(*a, **k): return 0, False
+
+    class Cancelled:
+        choice = None
+        def __init__(self, *a, **k): pass
+        def __getattr__(self, name): return lambda *a, **k: None
+        def exec(self): return QDialog.Rejected
+
+    errors = []
+    saved_hook = sys.excepthook
+    sys.excepthook = lambda *exc: errors.append(exc)
+    patched = dict(QMessageBox=Box, QFileDialog=Files, QInputDialog=Inputs,
+                   QPrintDialog=Cancelled, ProtectionDialog=Cancelled)
+    saved = {k: getattr(mw, k) for k in patched}
+    for k, v in patched.items():
+        setattr(mw, k, v)
+    try:
+        with _window() as w:
+            skip = {w.act_quit, w.act_close}  # end the session; closing is tested elsewhere
+            actions = [a for a in w.findChildren(QAction) if a not in skip and a.text()]
+            ran = 0
+            for act in actions:
+                if not act.isEnabled() or w.view.document is None:
+                    continue
+                act.trigger()
+                _app.processEvents()
+                ran += 1
+            assert ran > 30, f"only {ran} actions ran"
+            w.close_document()  # last: Close, with the (cancelling) save prompt
+    finally:
+        for k, v in saved.items():
+            setattr(mw, k, v)
+        sys.excepthook = saved_hook
+    assert not errors, "\n".join(f"{e[0].__name__}: {e[1]}" for e in errors)
+
+
 def test_rotate_view_is_gone():
     from PySide6.QtGui import QAction
     with _window() as w:

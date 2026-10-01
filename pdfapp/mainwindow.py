@@ -52,7 +52,8 @@ from .annots import (
 from .document import DocumentError, PasswordRequired, PdfDocument, SourceInfo
 from .findbar import FindBar
 from .pagelist import History, PageList
-from .printing import LOW_RES_DPI, PRINT_DPI, PrintError, print_pages
+from .printing import (LOW_RES_DPI, PRINT_DPI, PrintError, available_printers,
+                       default_printer, print_pages)
 from .protection import SET, UNLOCK, ProtectionDialog
 from .security import FULL_ACCESS, KEEP, REMOVE, Access
 from .fields import (
@@ -596,13 +597,26 @@ class MainWindow(QMainWindow):
             return
         self.view.commit_text_edit()  # what's being typed prints too
         self.view.commit_field_edit()
+        names = available_printers()
+        if not names:
+            QMessageBox.warning(
+                self, "Print",
+                "Windows reports no printers in this session, so there's nothing to "
+                "print to.\n\nOn a remote desktop, printers can take a moment to appear "
+                "after you log on -- try again shortly. If none ever appear, ask IT.")
+            return
         printer = QPrinter(QPrinter.HighResolution)
-        printer.setDocName(doc.title())
+        printer.setDocName(doc.title)
+        if not printer.isValid() or printer.printerName() not in names:
+            # A session with printers but no default one (a remote desktop session can
+            # be like that): start the dialog on a real printer rather than
+            # leave Windows' dialog to cope with none.
+            printer.setPrinterName(default_printer() or names[0])
+        selected = self.sidebar.selected_rows() if self.sidebar_dock.isVisible() else []
         dialog = QPrintDialog(printer, self)
         dialog.setMinMax(1, doc.page_count)
         options = (QAbstractPrintDialog.PrintPageRange | QAbstractPrintDialog.PrintCurrentPage
                    | QAbstractPrintDialog.PrintCollateCopies)
-        selected = self.sidebar.selected_rows() if self.sidebar_dock.isVisible() else []
         if len(selected) > 1:
             options |= QAbstractPrintDialog.PrintSelection  # the pages picked in the sidebar
         dialog.setOptions(options)
