@@ -377,7 +377,7 @@ def test_every_menu_action_runs():
     saved_hook = sys.excepthook
     sys.excepthook = lambda *exc: errors.append(exc)
     patched = dict(QMessageBox=Box, QFileDialog=Files, QInputDialog=Inputs,
-                   QPrintDialog=Cancelled, ProtectionDialog=Cancelled)
+                   QPrintDialog=Cancelled, PrintPreview=Cancelled, ProtectionDialog=Cancelled)
     saved = {k: getattr(mw, k) for k in patched}
     for k, v in patched.items():
         setattr(mw, k, v)

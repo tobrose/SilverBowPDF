@@ -61,46 +61,61 @@ def print_pages(renderer: PageRenderer, printer: QPrinter, pages: Sequence[int],
     screen, a page that fails doesn't stop the others -- its sheet says what
     went wrong instead, and the caller tells the user.
     """
-    doc = renderer.document
     painter = QPainter()
     if not painter.begin(printer):
         raise PrintError("The printer could not be started. Check that it's available.")
     failures: List[Tuple[int, str]] = []
     try:
-        area = painter.viewport()  # the printable area, in device pixels
-        device_dpi = printer.resolution()
+        area = QRectF(painter.viewport())  # the printable area, in device pixels
         for n, index in enumerate(pages):
             if progress is not None and not progress(n):
                 printer.abort()
                 break
             if n:
                 printer.newPage()
-            page_w, page_h = doc.transform(index).display_size_pt
-            turned, s, target = place_on_sheet(page_w, page_h, area.width(), area.height())
-            try:
-                # s is device px per point; no point rendering finer than the
-                # sheet will show, nor finer than max_dpi.
-                image = renderer.print_image(index, min(s, max_dpi / 72.0))
-            except Exception as exc:  # isolate, display, don't hide (rule 7)
-                failures.append((index, str(exc)))
-                painter.setPen(QColor("#b00020"))
-                painter.drawText(target.adjusted(device_dpi / 2, device_dpi / 2, 0, 0),
-                                 Qt.AlignTop | Qt.AlignLeft | Qt.TextWordWrap,
-                                 f"Page {index + 1} could not be printed:\n{exc}")
-                continue
-            painter.save()
-            painter.setRenderHint(QPainter.SmoothPixmapTransform)
-            if turned:
-                # Turn against the page's own rotation: a portrait page shown
-                # sideways by /Rotate 90 comes out upright again, not upside
-                # down. Plain landscape pages go counter-clockwise, as Acrobat.
-                painter.translate(target.center())
-                painter.rotate(90 if doc.page_rotation(index) == 270 else -90)
-                w, h = target.height(), target.width()
-                painter.drawImage(QRectF(QPointF(-w / 2, -h / 2), QPointF(w / 2, h / 2)), image)
-            else:
-                painter.drawImage(target, image)
-            painter.restore()
+            # Device px per point at most max_dpi: no finer than that.
+            error = draw_page(painter, renderer, index, area, max_dpi / 72.0)
+            if error is not None:
+                failures.append((index, error))
     finally:
         painter.end()
     return failures
+
+
+def draw_page(painter: QPainter, renderer: PageRenderer, index: int, area: QRectF,
+              max_scale: float, oversample: float = 1.0) -> Optional[str]:
+    """Draw one page onto a sheet's printable `area`, as it prints: fitted,
+    centred, turned when that's bigger. Shared by printing and the print
+    preview, so the preview shows exactly this.
+
+    Renders at the sheet's own px-per-point times `oversample` (the
+    preview's devicePixelRatio), capped at max_scale. A page that fails
+    gets its error written in its place (rule 7); the error is returned.
+    """
+    doc = renderer.document
+    page_w, page_h = doc.transform(index).display_size_pt
+    turned, s, target = place_on_sheet(page_w, page_h, area.width(), area.height())
+    target.translate(area.topLeft())
+    try:
+        image = renderer.print_image(index, min(s * oversample, max_scale))
+    except Exception as exc:  # isolate, display, don't hide (rule 7)
+        inset = min(target.width(), target.height()) / 20
+        painter.setPen(QColor("#b00020"))
+        painter.drawText(target.adjusted(inset, inset, -inset, -inset),
+                         Qt.AlignTop | Qt.AlignLeft | Qt.TextWordWrap,
+                         f"Page {index + 1} could not be printed:\n{exc}")
+        return str(exc)
+    painter.save()
+    painter.setRenderHint(QPainter.SmoothPixmapTransform)
+    if turned:
+        # Turn against the page's own rotation: a portrait page shown
+        # sideways by /Rotate 90 comes out upright again, not upside
+        # down. Plain landscape pages go counter-clockwise, as Acrobat.
+        painter.translate(target.center())
+        painter.rotate(90 if doc.page_rotation(index) == 270 else -90)
+        w, h = target.height(), target.width()
+        painter.drawImage(QRectF(QPointF(-w / 2, -h / 2), QPointF(w / 2, h / 2)), image)
+    else:
+        painter.drawImage(target, image)
+    painter.restore()
+    return None

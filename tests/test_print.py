@@ -192,6 +192,63 @@ def _fake_dialog(accept: bool, seen: list):
     return Fake
 
 
+def _fake_preview(accept: bool, shown: list):
+    """Stands in for the print preview: OK (all pages) or Cancel."""
+    from PySide6.QtWidgets import QDialog
+
+    class Fake:
+        def __init__(self, parent, renderer, printer, current, selected):
+            shown.append(printer.printerName())
+
+        def exec(self):
+            return QDialog.Accepted if accept else QDialog.Rejected
+
+        def apply_to(self, printer):
+            printer.setPrintRange(QPrinter.AllPages)
+    return Fake
+
+
+def test_print_preview():
+    from pdfapp.printpreview import PrintPreview
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp, "a.pdf")
+        _make_annotated_pdf(src)  # page 3 is /Rotate 90: shown landscape
+        with PdfDocument(src) as doc:
+            printer = _pdf_printer(Path(tmp, "x.pdf"))
+            preview = PrintPreview(None, PageRenderer(doc, max_pages=0), printer, 1, [0, 2])
+            preview.resize(600, 800)
+            from PySide6.QtWidgets import QLabel
+            notes = " ".join(l.text() for l in preview.findChildren(QLabel))
+            assert "portrait" in notes and "landscape" not in notes, notes
+            assert preview.pages() == [0, 1, 2] and "Sheet 1 of 3" in preview.where.text()
+            preview._go(+1)
+            assert "page 2" in preview.where.text() and preview.prev.isEnabled()
+
+            preview.current.setChecked(True)
+            assert preview.pages() == [1] and not preview.next.isEnabled()
+            preview.selection.setChecked(True)
+            assert preview.pages() == [0, 2], "the sidebar selection"
+            preview.first.setValue(2)  # typing a range selects "Pages"
+            assert preview.range.isChecked() and preview.pages() == [1, 2]
+            preview.apply_to(printer)
+            assert printer.printRange() == QPrinter.PageRange
+            assert (printer.fromPage(), printer.toPage()) == (2, 3)
+
+            # What it shows is what prints: the turned page 3, upright on
+            # portrait paper, the red square on page 1, no field tint.
+            preview.all.setChecked(True)
+            sheets = []
+            for _ in range(3):
+                sheets.append(preview.sheet.grab().toImage())
+                preview._go(+1)
+            sheet = sheets[0]
+            reds = sum(1 for x in range(0, sheet.width(), 3) for y in range(0, sheet.height(), 3)
+                       if sheet.pixelColor(x, y).red() > 200 and sheet.pixelColor(x, y).green() < 80)
+            assert reds > 5, "page 1's red square is on the sheet"
+            assert all(s.width() == sheets[0].width() for s in sheets), "one paper size"
+            preview.deleteLater()
+
+
 def test_print_menu_end_to_end():
     """File > Print as the user runs it -- the path that crashed in 0.6.0
     (doc.title called as a method) while every lower-level test passed."""
@@ -224,24 +281,37 @@ def test_print_menu_end_to_end():
             def setPrinterName(self, name):
                 self.chosen = True
                 super().setPrinterName(name)
+        previewed = []
         try:
             w.view.set_document(PdfDocument(src))
-            # OK in the dialog: it prints, with the job named after the file.
-            with _Patched(QPrintDialog=_fake_dialog(True, seen)):
+            # Preview, then OK in Windows' dialog: it prints, the job named
+            # after the file.
+            with _Patched(QPrintDialog=_fake_dialog(True, seen),
+                          PrintPreview=_fake_preview(True, previewed)):
                 w.act_print.trigger()  # the real menu action: a click, or Ctrl+P
+            assert previewed, "the preview comes first"
             assert printed and printed[0][1] == [0, 1, 2], printed
             assert seen[-1][1] == "a.pdf", seen
 
-            # No default printer: the dialog still starts on a real one.
+            # No default printer: preview and dialog still start on a real one.
             printed.clear()
             with _Patched(QPrinter=NoDefault, default_printer=lambda: "",
-                          QPrintDialog=_fake_dialog(True, seen)):
+                          QPrintDialog=_fake_dialog(True, seen),
+                          PrintPreview=_fake_preview(True, previewed)):
                 w.print_dialog()
-            assert seen[-1][0] == real[0] and printed
+            assert previewed[-1] == real[0] and seen[-1][0] == real[0] and printed
 
-            # Cancel: nothing more.
+            # Cancel in the preview: Windows' dialog never opens.
             printed.clear()
-            with _Patched(QPrintDialog=_fake_dialog(False, seen)):
+            seen.clear()
+            with _Patched(QPrintDialog=_fake_dialog(True, seen),
+                          PrintPreview=_fake_preview(False, previewed)):
+                w.print_dialog()
+            assert not seen and not printed
+
+            # Cancel in Windows' dialog: nothing more.
+            with _Patched(QPrintDialog=_fake_dialog(False, seen),
+                          PrintPreview=_fake_preview(True, previewed)):
                 w.print_dialog()
             assert not printed
 

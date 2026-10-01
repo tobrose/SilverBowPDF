@@ -54,6 +54,7 @@ from .findbar import FindBar
 from .pagelist import History, PageList
 from .printing import (LOW_RES_DPI, PRINT_DPI, PrintError, available_printers,
                        default_printer, print_pages)
+from .printpreview import PrintPreview
 from .protection import SET, UNLOCK, ProtectionDialog
 from .security import FULL_ACCESS, KEEP, REMOVE, Access
 from .fields import (
@@ -613,6 +614,13 @@ class MainWindow(QMainWindow):
             # leave Windows' dialog to cope with none.
             printer.setPrinterName(default_printer() or names[0])
         selected = self.sidebar.selected_rows() if self.sidebar_dock.isVisible() else []
+        # Our preview first (user's choice): Windows 11's dialog can't preview
+        # this app, and says so. Its page choice carries into Windows' dialog.
+        preview = PrintPreview(self, self.view.renderer, printer, self.view.current_page,
+                               selected)
+        if preview.exec() != QDialog.Accepted:
+            return
+        preview.apply_to(printer)
         dialog = QPrintDialog(printer, self)
         dialog.setMinMax(1, doc.page_count)
         options = (QAbstractPrintDialog.PrintPageRange | QAbstractPrintDialog.PrintCurrentPage

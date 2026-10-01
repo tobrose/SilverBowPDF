@@ -67,6 +67,12 @@ pdfapp/
                  FPDF_PRINTING, no form-field tint, unsaved edits included),
                  fitted and centred, turned a quarter when bigger (against
                  the page's own /Rotate so it lands upright), max 300 DPI.
+  printpreview.py Print preview, shown before Windows' print dialog (user's
+                 choice: Windows 11's dialog can't preview this app and says
+                 "This app doesn't support print preview"). Draws sheets with
+                 printing.draw_page -- the same code the printer gets -- one
+                 at a time, only that one kept. Its page choice is preset in
+                 Windows' dialog.
   thumbnails.py  Page sidebar: multi-select, drag-to-reorder, lazy thumbnails.
                  Emits requests only; MainWindow makes the PageList edit.
   mainwindow.py  Menus, toolbar, status bar, drag-and-drop.
@@ -169,6 +175,8 @@ passing, and give a new feature its own test that goes through its action.
   an access violation, not an exception).
 - UI smoke tests: QTest.keyClicks aborts the process on non-ASCII text;
   use insertPlainText for those.
+- PySide6 enums are always truthy: compare them (`== QPageLayout.Landscape`),
+  never `if layout.orientation():`.
 
 - Type hints on public functions. `from __future__ import annotations` at the top.
 - Comments explain *why*, especially where something looks wrong but isn't
@@ -285,7 +293,8 @@ asserts preview text boxes == saved within 0.5pt and pixels unchanged.
 Opening a PDF whose first pages have no text shows a status-bar hint.
 The self-test runs OCR (says so if the Windows install has no language).
 
-Print (Ctrl+P, toolbar, File menu): Windows print dialog -- all, a range,
+Print (Ctrl+P, toolbar, File menu): our print preview first (sheet by
+sheet, page choice), then Windows print dialog -- all, a range,
 current page, or the sidebar selection; copies (sent as extra sheets if
 the driver can't); progress with Cancel. A page that fails to render gets
 its error printed on its sheet and is listed afterwards (rule 7). The
