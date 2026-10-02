@@ -17,7 +17,19 @@ for rendering and pikepdf (qpdf) for saving.
 Everything is undoable until you save, and what you see is what's saved:
 the tests compare the on-screen preview with the saved file, pixel for pixel.
 
-## Run it
+## Download
+
+**[⬇ Download the installer (SilverbowPDF-Setup.exe)](https://github.com/tobrose/SilverBowPDF/releases/latest/download/SilverbowPDF-Setup.exe)**
+— the newest version, for Windows 10 / 11 (64-bit). Double-click it, then
+Next, Install. Older versions and what changed in each:
+[Releases](https://github.com/tobrose/SilverBowPDF/releases).
+
+For IT: `SilverbowPDF-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART`
+installs silently for all users; see [docs/PACKAGING.md](docs/PACKAGING.md)
+for deployment (endpoint-management tools, GPO, machine images), the admin
+policy and `--self-test`.
+
+## Run from source
 
 ```bash
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
