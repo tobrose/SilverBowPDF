@@ -105,6 +105,9 @@ Dependency direction is one-way: `transform` <- `pagelist` <- `document` <-
 `rendering` <- `pageview`/`thumbnails`/`printing` <- `findbar` <- `mainwindow`, with `writer` depending only on
 `pagelist` and used only by `mainwindow`. `ocrlayer` (no libs) sits beside
 `annots`; `ocr` sits on `document` and only `mainwindow`/`selftest` use it.
+Signing: `digitalid` <- `wincert` <- `pdfsign` (none of them Qt; `pdfsign`
+needs only `annots`/`textlayout` and loads `wincert` lazily for trust), with
+`sigimage` (Qt) and `signui` on top, used only by `mainwindow`/`selftest`.
 Nothing lower imports anything higher.
 
 Page edits never mutate anything until save: pdfium keeps rendering the

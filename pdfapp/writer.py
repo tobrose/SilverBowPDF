@@ -1,8 +1,9 @@
 """Write page edits out to disk with pikepdf.
 
-The only module that produces a PDF. Rendering never goes through here, and
-nothing here goes through pdfium -- the two libraries each see the file on
-their own terms.
+The only module that SAVES a PDF (pdfsign only appends a signed revision
+to one, because rewriting would break signatures). Rendering never goes
+through here, and nothing here goes through pdfium -- the two libraries each
+see the file on their own terms.
 
 Saving is two steps so the caller can release its own handle in between:
 
