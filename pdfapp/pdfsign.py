@@ -66,6 +66,10 @@ class SigInfo:
     message: str
     reason: str = ""
     issuer: str = ""
+    # The certificate chains to a root Windows trusts AND the signature is
+    # intact. Otherwise `signer` is only the name the ID claims: anyone can
+    # make an ID in any name, so it must never be shown as "signed by".
+    verified: bool = False
 
 
 # ---- signing -------------------------------------------------------------
@@ -162,6 +166,33 @@ def _appearance_stream(writer, look: Look, rect, rotation: int):
             [generic.NumberObject(v) for v in _COUNTER_ROTATION[rotation % 360]]),
         pdf_name("/Resources"): resources}, stream_data=ops)
     return writer.add_object(form)
+
+
+def damaged(path: Path, password: Optional[str], page_index: int = 0) -> Optional[str]:
+    """Why `path` can't be signed as it is, or None if it can.
+
+    Signing appends to the file, so pyHanko must read it as written -- and
+    it reads strictly: a file every viewer opens (pdfium quietly rebuilds a
+    broken cross-reference table, common from scanners) can fail here with
+    "Could not find xref table". This reads what signing reads: the
+    cross-reference table and trailer, the form's fields, and the page
+    tree down to `page_index`. Rewriting the file (writer.py; qpdf repairs
+    as it reads) makes such a file signable."""
+    from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
+    from pyhanko.sign import fields
+
+    try:
+        with open(path, "rb") as f:
+            writer = IncrementalPdfFileWriter(f)
+            if writer.prev.encrypted:
+                writer.encrypt(password or "")
+            list(fields.enumerate_sig_fields(writer))
+            writer.find_page_for_modification(page_index)
+    except OSError:
+        raise  # can't read the file at all: not damage, and not ours to hide
+    except Exception as exc:  # pyHanko's PdfReadError, or whatever a mangled object raises
+        return f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+    return None
 
 
 def sign(source: Path, password: Optional[str], dest: Path, page_index: int, rect,
@@ -269,10 +300,10 @@ def check(path: Path, password: Optional[str] = None,
                 message = "Valid when signed, but the document was changed afterwards."
             elif not st.trusted:
                 level = UNTRUSTED
-                message = ("The document hasn't changed since it was signed, but the signer's "
-                           "identity isn't verified" + (" (a self-signed digital ID)."
-                                                        if cert.self_signed in ("yes", "maybe")
-                                                        else " (not issued by a trusted authority)."))
+                message = ("The document hasn't changed since it was signed, but " + (
+                    "the digital ID is self-made, and anyone can make one in any name."
+                    if cert.self_signed in ("yes", "maybe")
+                    else "the digital ID wasn't issued by an authority this computer trusts."))
             else:
                 level = OK
                 message = "Valid: the signer is verified and the document hasn't changed since."
@@ -285,5 +316,6 @@ def check(path: Path, password: Optional[str] = None,
             except Exception:
                 pass
             results.append(SigInfo(name, signer, when, level, message, reason,
-                                   common_name_or(cert.issuer)))
+                                   common_name_or(cert.issuer),
+                                   verified=bool(st.trusted and st.intact and st.valid)))
     return results

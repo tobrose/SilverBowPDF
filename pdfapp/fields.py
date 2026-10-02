@@ -33,6 +33,7 @@ FieldKey = Tuple[int, str]  # (file, fully-qualified name)
 
 TEXT, CHECKBOX, RADIO, COMBO = "text", "checkbox", "radio", "combo"
 FILLABLE = (TEXT, CHECKBOX, RADIO, COMBO)
+SIGNATURE = "signature"
 
 FLAG_READONLY = 1
 FLAG_REQUIRED = 2
@@ -58,7 +59,7 @@ class Widget:
     origin: Optional[int]
     rect: Rect
     name: str
-    kind: str              # one of FILLABLE, or "other" (push button, signature, list)
+    kind: str              # one of FILLABLE, SIGNATURE, or "other" (push button, list)
     flags: int
     value: str
     on_state: str = ""
@@ -66,6 +67,10 @@ class Widget:
     font_size: float = 0.0  # 0: auto
     changed: bool = False
     uid: int = 0
+    # A signature field with a signature in it (/V on the widget itself; a
+    # kid widget's /V is on its parent, which pdfium can't reach -- the view
+    # also has the signed field names from checking the signatures).
+    signed: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "rect", normalize_rect(tuple(float(v) for v in self.rect)))

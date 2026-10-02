@@ -12,7 +12,7 @@ import pypdfium2 as pdfium
 import pypdfium2.raw as pdfium_c
 
 from .annots import MARKUP_KINDS, Annot, AnnotEdits, PageKey, is_editable
-from .fields import CHECKBOX, COMBO, RADIO, TEXT, FieldEdits, FormEdits, Widget
+from .fields import CHECKBOX, COMBO, RADIO, SIGNATURE, TEXT, FieldEdits, FormEdits, Widget
 from .ocrlayer import OcrEdits, text_layer_pdf
 from .pagelist import PageList, PageRef
 from .security import Access, access_from_bits
@@ -763,6 +763,7 @@ class PdfDocument:
 _FIELD_KINDS = {
     pdfium_c.FPDF_FORMFIELD_TEXTFIELD: TEXT, pdfium_c.FPDF_FORMFIELD_CHECKBOX: CHECKBOX,
     pdfium_c.FPDF_FORMFIELD_RADIOBUTTON: RADIO, pdfium_c.FPDF_FORMFIELD_COMBOBOX: COMBO,
+    pdfium_c.FPDF_FORMFIELD_SIGNATURE: SIGNATURE,
 }
 
 
@@ -793,8 +794,9 @@ def _read_widget(formenv, handle, index: int, rect) -> Widget:
             for n in range(max(0, pdfium_c.FPDFAnnot_GetOptionCount(formenv, handle))))
     size = ctypes.c_float(0.0)
     font_size = size.value if pdfium_c.FPDFAnnot_GetFontSize(formenv, handle, size) else 0.0
+    signed = kind == SIGNATURE and bool(pdfium_c.FPDFAnnot_HasKey(handle, b"V"))
     return Widget(index, (rect.left, rect.bottom, rect.right, rect.top), name, kind, flags,
-                  value, on_state, options, font_size)
+                  value, on_state, options, font_size, signed=signed)
 
 
 def _line_points(handle) -> Tuple[float, ...]:

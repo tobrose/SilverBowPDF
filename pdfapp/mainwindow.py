@@ -1034,6 +1034,12 @@ class MainWindow(QMainWindow):
         if dest is None:
             return
         unchanged = self._unchanged()
+        if unchanged:
+            problem = pdfsign.damaged(doc.path, doc.password, index)
+            if problem is not None:
+                if not self._confirm_repair(problem):
+                    return
+                unchanged = False  # sign a clean rewrite instead of the file's own bytes
         if not unchanged and not self._confirm_breaking_signatures(dest):
             return
         written = None
@@ -1057,9 +1063,20 @@ class MainWindow(QMainWindow):
                 written[0].unlink(missing_ok=True)
         self._install(signed, dest, password, "Signed")
 
+    def _confirm_repair(self, problem: str) -> bool:
+        answer = QMessageBox.warning(
+            self, "Repair before signing?",
+            f"{self.view.document.path.name} is slightly damaged inside. It opens and "
+            f"shows fine, but a signature can't be added to it as it is.\n\n"
+            f"Click OK to repair it -- by saving a clean copy, which changes nothing "
+            f"you can see -- and sign that.\n\n(What was found: {problem})",
+            QMessageBox.Ok | QMessageBox.Cancel, QMessageBox.Ok)
+        return answer == QMessageBox.Ok
+
     def _check_signatures(self, document: Optional[PdfDocument]) -> None:
         """On opening: check the document's signatures and say what was found."""
         self._signature_infos = []
+        self.view.signed_fields = frozenset()
         self.act_signatures.setEnabled(document is not None)
         if document is None or not document.signature_count():
             self.signature_bar.hide()
@@ -1070,6 +1087,7 @@ class MainWindow(QMainWindow):
             self._show_signature_bar(pdfsign.BROKEN,
                                      f"<b>The signatures couldn't be checked:</b> {exc}")
             return
+        self.view.signed_fields = frozenset(i.field for i in self._signature_infos)
         if self._signature_infos:
             self._show_signature_bar(*signature_summary(self._signature_infos))
         else:

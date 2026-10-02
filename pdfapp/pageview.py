@@ -61,6 +61,7 @@ from .fields import (
     COMBO,
     NEW_FIELD_SIZES,
     RADIO,
+    SIGNATURE,
     TEXT,
     Widget,
     auto_font_size,
@@ -461,6 +462,9 @@ class PdfView(QScrollArea):
         # the mark bar, a field to type in) what would then be refused.
         self.access = FULL_ACCESS
         self.signature_image = None  # SignatureImage the picture-signature tool places
+        # Names of the document's signed signature fields (MainWindow, from
+        # checking them): Edit Fields leaves those alone, see _locked.
+        self.signed_fields: frozenset = frozenset()
         self.highlight_color = HIGHLIGHT_COLORS["Yellow"]
         self.text_size = 12.0
         self.text_color = TEXT_COLORS["Black"]
@@ -904,6 +908,9 @@ class PdfView(QScrollArea):
     def _hover(self, page: "PageWidget", pos: QPoint, event) -> None:
         if self._tool is Tool.FORM:
             widget = self._field_at(page, pos)
+            if widget is not None and self._locked(widget):
+                page.setCursor(Qt.ForbiddenCursor)
+                return
             edges = self._edges_of(page, widget, pos) if widget is not None else ""
             page.setCursor(_EDGE_CURSORS[edges] if edges else
                            Qt.SizeAllCursor if widget is not None else Qt.ArrowCursor)
@@ -993,6 +1000,8 @@ class PdfView(QScrollArea):
     def page_double_click(self, page: "PageWidget", event) -> bool:
         if self._tool is Tool.FORM and self.document is not None:
             found = self._field_at(page, event.position().toPoint())
+            if found is not None and self._locked(found):
+                return True  # the press already said why
             if found is not None:
                 self.field_properties.emit(page.index, found)
                 return True
@@ -1268,8 +1277,19 @@ class PdfView(QScrollArea):
             edges += "b"
         return edges
 
+    def _locked(self, widget: Widget) -> bool:
+        """A signed signature field: its signature covers where it is, so
+        moving, resizing or deleting it breaks the signature (Acrobat
+        locks them too). Saving would warn -- this doesn't let it start."""
+        return widget.kind == SIGNATURE and (widget.signed or widget.name in self.signed_fields)
+
     def _form_press(self, page: "PageWidget", pos: QPoint) -> bool:
         widget = self._field_at(page, pos)
+        if widget is not None and self._locked(widget):
+            self.select_field(page.index, None)
+            self.message.emit("This signature field is signed: moving, resizing or deleting it "
+                              "would break the signature.")
+            return True
         if widget is None:
             # Clicking away from the fields means done preparing the form
             # (user's rule, as for text boxes and shapes): back to Select.

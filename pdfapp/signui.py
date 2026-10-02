@@ -37,6 +37,8 @@ _BROWSE, _CREATE = "browse", "create"
 LEVEL_COLOURS = {OK: "#1e7b34", UNTRUSTED: "#8a6100", CHANGED: "#b35c00", BROKEN: "#b00020"}
 LEVEL_WORDS = {OK: "Valid", UNTRUSTED: "Signer not verified", CHANGED: "Changed after signing",
                BROKEN: "Broken"}
+HEADLINES = {UNTRUSTED: "Signer not verified.", CHANGED: "Changed after signing.",
+             BROKEN: "Signature broken."}
 
 
 def default_id_folder() -> Path:
@@ -297,8 +299,15 @@ def summary(infos: List[SigInfo]) -> tuple:
     worst = max((i.level for i in infos), key=order.index)
     if len(infos) == 1:
         i = infos[0]
-        when = f" on {i.when:%Y-%m-%d %H:%M}" if i.when else ""
-        return worst, f"<b>Signed by {_esc(i.signer)}{when}.</b> {_esc(i.message)}"
+        # No timestamp authority is involved: the date is the signer's clock.
+        when = f", dated {i.when:%Y-%m-%d %H:%M}" if i.when else ""
+        if i.level == OK:
+            return worst, f"<b>Signed by {_esc(i.signer)}</b>{when}. {_esc(i.message)}"
+        # The problem first, and the name only as claimed: an unverified ID
+        # can say "IT Director" as easily as anything else.
+        who = (f"Signed by {_esc(i.signer)}" if i.verified
+               else f"Signed with a digital ID in the name of “{_esc(i.signer)}”")
+        return worst, f"<b>{HEADLINES[i.level]}</b> {who}{when}. {_esc(i.message)}"
     words = {OK: "valid", UNTRUSTED: "signer not verified", CHANGED: "changed after signing",
              BROKEN: "broken"}
     counts = [f"{sum(1 for i in infos if i.level == lv)} {words[lv]}" for lv in order
@@ -317,13 +326,16 @@ class SignaturesDialog(QDialog):
         self.setMinimumWidth(440)
         layout = QVBoxLayout(self)
         for i in infos:
-            when = f"{i.when:%Y-%m-%d %H:%M:%S %z}" if i.when else "time not given"
+            when = (f"{i.when:%Y-%m-%d %H:%M:%S %z} (by the signer's own clock)" if i.when
+                    else "not given")
+            who = (f"<b>{_esc(i.signer)}</b>" if i.verified
+                   else f"<b>“{_esc(i.signer)}”</b> (name not verified)")
             reason = f"<br>Reason: {_esc(i.reason)}" if i.reason else ""
             issuer = f"<br>Certificate issued by: {_esc(i.issuer)}" if i.issuer else ""
             label = QLabel(
-                f"<b>{_esc(i.signer)}</b> &nbsp; <span style='color:{LEVEL_COLOURS[i.level]}'>"
+                f"{who} &nbsp; <span style='color:{LEVEL_COLOURS[i.level]}'>"
                 f"<b>{LEVEL_WORDS[i.level]}</b></span><br>{_esc(i.message)}<br>"
-                f"Signed: {when}{reason}{issuer}<br><span style='color:#808088'>Field: "
+                f"Dated: {when}{reason}{issuer}<br><span style='color:#808088'>Field: "
                 f"{_esc(i.field)}</span>", self)
             label.setWordWrap(True)
             label.setTextFormat(Qt.RichText)

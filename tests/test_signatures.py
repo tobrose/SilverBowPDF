@@ -128,7 +128,10 @@ def test_picture_signature_reads_upright_on_rotated_page():
 
 import datetime as dt  # noqa: E402
 
+from dataclasses import replace  # noqa: E402
+
 from pdfapp import digitalid, pdfsign  # noqa: E402
+from pdfapp.signui import summary  # noqa: E402
 
 NO_TRUST = ([], [])
 
@@ -183,11 +186,17 @@ def test_sign_and_check():
         assert name == "Signature1"
         assert signed.read_bytes().startswith(src.read_bytes()), "incremental: original kept"
         (info,) = pdfsign.check(signed, trust=NO_TRUST)
-        assert info.level == pdfsign.UNTRUSTED and "self-signed" in info.message, info
+        assert info.level == pdfsign.UNTRUSTED and "self-made" in info.message, info
+        assert not info.verified
         assert info.signer == "Jane Tester" and info.reason == "I approve this document"
         trusted = ([digitalid.pfx_signer(path, pw).signing_cert], [])
         (info,) = pdfsign.check(signed, trust=trusted)
-        assert info.level == pdfsign.OK, info
+        assert info.level == pdfsign.OK and info.verified, info
+        level, bar = summary([info])
+        assert bar.startswith("<b>Signed by Jane Tester</b>, dated "), bar
+        # A verified ID on a document changed since: the problem leads.
+        changed = replace(info, level=pdfsign.CHANGED, message="Changed afterwards.")
+        assert summary([changed])[1].startswith("<b>Changed after signing.</b> Signed by Jane")
         with PdfDocument(signed) as doc:
             assert doc.signature_count() == 1
             assert doc.access().full, "signing doesn't restrict the document"
@@ -421,7 +430,9 @@ def test_sign_with_certificate_in_the_app():
             assert w.view.tool is Tool.SELECT, "one signature per pick"
             assert w.view.document.path == signed, "the signed copy is now open"
             assert signed.read_bytes().startswith(original), "incremental: nothing rewritten"
-            assert w.signature_bar.isVisible() and "Signed by Jane Tester" in w.signature_text.text()
+            bar = w.signature_text.text()
+            assert w.signature_bar.isVisible() and bar.startswith("<b>Signer not verified.</b>")
+            assert "in the name of “Jane Tester”" in bar and "Signed by" not in bar, bar
             assert len(w._signature_infos) == 1
             assert w._signature_infos[0].level == pdfsign.UNTRUSTED, w._signature_infos
 
@@ -476,6 +487,104 @@ def test_picture_signature_tool_in_the_app():
             _drag_on_page(w.view, QPoint(200, 500), QPoint(420, 580))
             (stamp,) = [a for a in w.view.document.page_annots(0) if a.image is not None]
             assert w.history.undo_label() == "Add Signature" and w.view.tool is Tool.SELECT
+
+
+def _broken_xref_pdf(path):
+    """A PDF every viewer opens, with every cross-reference offset wrong --
+    a line inserted after the header, as some scanners' software does."""
+    _plain_pdf(path)
+    raw = path.read_bytes()
+    header_end = raw.index(b"\n") + 1
+    path.write_bytes(raw[:header_end] + b"% written by a scanner\n" + raw[header_end:])
+
+
+def test_damaged_file_is_repaired_before_signing():
+    with tempfile.TemporaryDirectory() as tmp:
+        bad, signed = Path(tmp, "scan.pdf"), Path(tmp, "scan-signed.pdf")
+        _broken_xref_pdf(bad)
+        assert "xref" in pdfsign.damaged(bad, None).lower()
+        before = bad.read_bytes()
+        pfx, pw = _id(tmp)
+        asked = []
+
+        def box(answer):
+            class Box:
+                Ok, Cancel, Save = 1, 0, 2
+
+                @staticmethod
+                def warning(parent, title, text, *a):
+                    asked.append(text)
+                    return answer
+            return Box
+        with _app_window(tmp, bad) as w:
+            assert w.view.document.page_count == 1, "pdfium opens it regardless"
+            w._ask_save_path = lambda title, suggested: signed
+            with _patched(SignDialog=_fake_sign_dialog(pfx, pw), QMessageBox=box(0)):
+                w.view.signature_box.emit(0, (300, 100, 520, 170))  # Cancel: nothing happens
+            assert asked and "damaged" in asked[0] and not signed.exists()
+            assert w.view.document.path == bad and bad.read_bytes() == before
+            with _patched(SignDialog=_fake_sign_dialog(pfx, pw), QMessageBox=box(1)):
+                w.view.signature_box.emit(0, (300, 100, 520, 170))  # OK: repaired, signed
+            assert w.view.document.path == signed and bad.read_bytes() == before
+            assert pdfsign.damaged(signed, None) is None
+            assert [i.level for i in w._signature_infos] == [pdfsign.UNTRUSTED]
+
+
+def _with_empty_signature_fields(src, dest):
+    """`src` plus two empty signature fields: "Kid", a widget under a parent
+    field (where /V lands on the parent once signed), and "Spare"."""
+    pdf = pikepdf.open(src)
+    page = pdf.pages[0]
+    parent = pdf.make_indirect(pikepdf.Dictionary(FT=Name.Sig, T=pikepdf.String("Kid")))
+    kid = pdf.make_indirect(pikepdf.Dictionary(Type=Name.Annot, Subtype=Name.Widget, F=4,
+                                               Rect=[50, 400, 250, 460], Parent=parent,
+                                               P=page.obj))
+    parent.Kids = pikepdf.Array([kid])
+    spare = pdf.make_indirect(pikepdf.Dictionary(Type=Name.Annot, Subtype=Name.Widget, F=4,
+                                                 FT=Name.Sig, T=pikepdf.String("Spare"),
+                                                 Rect=[300, 400, 500, 460], P=page.obj))
+    page.Annots = pdf.make_indirect(pikepdf.Array([kid, spare]))
+    pdf.Root.AcroForm = pikepdf.Dictionary(Fields=pikepdf.Array([parent, spare]), SigFlags=3)
+    pdf.save(dest)
+    pdf.close()
+
+
+def test_signed_signature_fields_are_locked_in_edit_fields():
+    from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
+    from pyhanko.sign import signers
+    with tempfile.TemporaryDirectory() as tmp:
+        src, fields_pdf = Path(tmp, "c.pdf"), Path(tmp, "fields.pdf")
+        kid_signed, signed = Path(tmp, "kid-signed.pdf"), Path(tmp, "signed.pdf")
+        _plain_pdf(src)
+        _with_empty_signature_fields(src, fields_pdf)
+        pfx, pw = _id(tmp)
+        with open(fields_pdf, "rb") as f, open(kid_signed, "wb") as out:  # sign "Kid" in place
+            signers.PdfSigner(signers.PdfSignatureMetadata(field_name="Kid"),
+                              signer=digitalid.pfx_signer(pfx, pw)).sign_pdf(
+                IncrementalPdfFileWriter(f), output=out)
+        pdfsign.sign(kid_signed, None, signed, 0, (300, 100, 540, 180), 0, _look(),
+                     digitalid.pfx_signer(pfx, pw))  # and a new field of ours
+        with _app_window(tmp, signed) as w:
+            said = []
+            w.view.message.connect(said.append)
+            widgets = {x.name: x for x in w.view.document.current_widgets(0)}
+            assert widgets["Signature1"].signed and not widgets["Kid"].signed, \
+                "pdfium sees /V on a merged field only; the kid is known by name"
+            assert w.view.signed_fields == {"Kid", "Signature1"}
+            assert not widgets["Spare"].signed
+            w.view.set_tool(Tool.FORM)
+            page = w.view._pages[0]
+            for rect in ((300, 100, 540, 180), (50, 400, 250, 460)):  # ours, the kid
+                left, top, right, bottom = page.widget_transform().pdf_rect_to_widget(rect)
+                centre = QPoint(int((left + right) / 2), int((top + bottom) / 2))
+                _drag_on_page(w.view, centre, centre + QPoint(40, 30))
+                assert w.view.selected_field() is None and "signed" in said[-1]
+                assert w.view.tool is Tool.FORM and not w.history.can_undo()
+            # An empty signature field is still the form author's to move.
+            left, top, right, bottom = page.widget_transform().pdf_rect_to_widget((300, 400, 500, 460))
+            centre = QPoint(int((left + right) / 2), int((top + bottom) / 2))
+            _drag_on_page(w.view, centre, centre + QPoint(40, 30))
+            assert w.history.undo_label() == "Move Spare"
 
 
 def test_restricted_document_blocks_signing():

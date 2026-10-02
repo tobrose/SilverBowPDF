@@ -38,10 +38,15 @@ pdfapp/
                  page of one of its sources. Sources are only ever added.
                  Text layer (char_at/nearest_char/word_at/text_in/text_rects)
                  is pdfium's; char indices are pdfium's, ranges inclusive.
+                 At most PAGE_CACHE_LIMIT (12) pdfium pages open, LRU: a
+                 rendered page keeps its decoded images until closed. Page
+                 geometry is cached apart, so transforms never reload one.
   writer.py      The only code that SAVES PDFs (signing appends; see pdfsign). pikepdf. write to temp -> commit (os.replace).
                  prune_dangling() drops bookmarks/links/fields/dests aimed at removed pages.
                  Foreign pages: plain append + _merge_forms, NOT add_pages_from (see rule 6).
-  rendering.py   pdfium bitmap -> QImage, plus an LRU page cache.
+  rendering.py   pdfium bitmap -> QImage (one copy, over pdfium's buffer), plus
+                 a page-image cache with a 128MB budget: other zoom levels go
+                 first, then LRU, never the newest two (both may be on screen).
   pageview.py    Continuous scroll view, zoom, tools, annotation
                  select/move/delete. Emits edit requests; never edits.
                  No view rotation in the UI (removed, user's call); the
@@ -368,12 +373,26 @@ Signatures (user's choices, 2026-10-02), Sign button / Tools > Sign:
 - Saving a signed document (normal save, qpdf rewrite) warns first that
   the signatures will break; an untouched Save As copies the bytes.
 - Restricted files: signing follows the annotate permission.
+- A file pyHanko can't append to (pdfsign.damaged: typically a broken
+  xref table, which pdfium silently rebuilds) is offered a repair first:
+  the qpdf rewrite path, as for unsaved edits, then signed.
+- Wording (review, 2026-10-02): "Signed by X" only when the certificate is
+  verified (SigInfo.verified); otherwise the problem leads and the name is
+  "in the name of X" -- anyone can make an ID in any name. Dates are the
+  signer's own clock (no timestamp authority), and say so in Details.
+- Signed signature fields are locked in Edit Fields (Acrobat does the
+  same); empty ones still move. Signed = /V on the widget, or the field's
+  name among the checked signatures (a kid's /V is on its parent, which
+  pdfium can't reach).
 The self-test signs twice (.pfx and Windows CNG) and checks both.
 
 Next: nothing queued -- ask.
 
 Deployment target is shared multi-session desktops: no GPU, non-persistent
-profiles, pixels re-encoded over a remote-display protocol. Keep memory and repaints lean; don't
+profiles, pixels re-encoded over a remote-display protocol. Keep memory and repaints lean
+(tests/test_memory.py holds the limits: pages, page images, and no
+off-screen renders -- Qt's deferred show of new page widgets once made
+every open render the whole document); don't
 count on per-user settings surviving logoff.
 
 ## Known limits (don't "fix" these without discussion)
