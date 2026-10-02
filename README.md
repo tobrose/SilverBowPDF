@@ -1,6 +1,21 @@
 # SilverbowPDF
 
-A desktop PDF viewer and (eventually) editor. Python + PySide6 + pdfium.
+A desktop PDF viewer and editor for Windows. Python + PySide6, with pdfium
+for rendering and pikepdf (qpdf) for saving.
+
+- **Pages:** rotate, reorder, delete, insert from other PDFs, extract to a new file.
+- **Markup:** highlight / underline / strikethrough, typewriter text, notes,
+  shapes, freehand pen, stamps.
+- **Forms:** fill in fields, and create text fields, checkboxes and dropdowns.
+- **Scans:** make scanned pages searchable with Windows' built-in OCR.
+- **Find, print** (with preview), **password protection** (AES-256), and
+  respect for the restrictions a PDF's author set.
+- Built to be deployed: a single-click installer with silent install, an
+  administrator policy, and a `--self-test` for checking a build on the
+  machine it's installed on (see [docs/PACKAGING.md](docs/PACKAGING.md)).
+
+Everything is undoable until you save, and what you see is what's saved:
+the tests compare the on-screen preview with the saved file, pixel for pixel.
 
 ## Run it
 
@@ -52,7 +67,7 @@ on a headless box.
 | `R` / `E` / `L` / `A` / `P` | Rectangle / Ellipse / Line / Arrow / Pen -- drag to draw; `Shift` squares or snaps to 45 degrees |
 | Stamp button | Pick a stamp, click to place it |
 | Click a form field | Type into it (`Tab` for the next field), tick a box, or pick from a list |
-| Annotate button | Every markup tool: notes, highlight/underline/strike, typewriter, text box, shapes, pen, stamps, styles |
+| Annotate button | Every markup tool: notes, highlight/underline/strike, typewriter, shapes, pen, stamps, styles |
 | Form button | Edit Fields (move, resize, delete, double-click for properties; click empty page to finish) or draw a new text field, checkbox or dropdown |
 | Click, drag, `Delete` | Select, move, delete an annotation |
 | Double-click an annotation | Edit its comment |
@@ -68,19 +83,27 @@ Drag a PDF onto the window to open it.
 
 ```
 pdfapp/
-  transform.py   PageTransform -- all coordinate math. Start here.
-  pagelist.py    Page edits as data, plus snapshot undo.
-  document.py    pypdfium2 wrapper. No Qt imports, testable headless.
-  writer.py      Saves edits with pikepdf: temp file, verify, atomic replace.
-  rendering.py   pdfium bitmap -> QImage, plus an LRU page cache.
-  pageview.py    Continuous scrolling view, zoom, tools, text selection.
-  findbar.py     Ctrl+F find bar.
-  thumbnails.py  Page sidebar: select, drag to reorder, lazy thumbnails.
-  mainwindow.py  Menus, toolbar, status bar, drag-and-drop.
-tests/
-  test_transform.py
-  test_pages.py
+  transform.py     PageTransform -- all coordinate math. Start here.
+  pagelist.py      Page edits as data, plus snapshot undo.
+  annots.py        Annotation edits as data; annotpdf.py writes them (pikepdf).
+  fields.py        Form fields as data; formpdf.py writes them (pikepdf).
+  ocrlayer.py      The invisible text layer OCR adds; ocr.py runs Windows OCR.
+  security.py      What a protected PDF allows; protection.py is its dialog.
+  document.py      pypdfium2 wrapper. No Qt imports, testable headless.
+  writer.py        Saves edits with pikepdf: temp file, verify, atomic replace.
+  rendering.py     pdfium bitmap -> QImage, plus an LRU page cache.
+  pageview.py      Continuous scrolling view, zoom, tools, text selection.
+  findbar.py       Ctrl+F find bar.
+  printing.py      Printing; printpreview.py is the preview before it.
+  thumbnails.py    Page sidebar: select, drag to reorder, lazy thumbnails.
+  mainwindow.py    Menus, toolbar, status bar, drag-and-drop.
+  errors.py        Unexpected errors are shown and logged, never lost.
+  selftest.py      --self-test: proves an installed build works.
+packaging/         PyInstaller spec, Inno Setup installer script, build.ps1.
+tests/             One file per area; run them all before a build (build.ps1 does).
 ```
+
+CLAUDE.md holds the design rules and the reasons behind them.
 
 `transform.py` is the load-bearing file. Three coordinate systems (PDF user
 space, bitmap space, widget space) and four rotation values means twelve ways
@@ -90,17 +113,10 @@ point against pdfium's own `PdfPosConv`, including offset CropBoxes and
 combined intrinsic-plus-view rotation, so a regression fails a test instead of
 putting a highlight two inches from where the user clicked.
 
-## Status
+## Requirements
 
-Working: open (including encrypted, with a password prompt), continuous scroll,
-zoom to cursor, fit width/page, find (Ctrl+F), pan, page navigation, form-field
-rendering, drag-and-drop, per-page error isolation, page operations
-(rotate/delete/reorder) with undo and save, thumbnail sidebar with
-multi-select and drag to reorder, extract pages to a new PDF, insert pages
-from other PDFs.
-
-Not built yet, in intended order: annotations, form filling, encryption,
-packaging.
+Windows 10 or 11 (OCR uses Windows' own engine; the rest is cross-platform
+Python, but only Windows is built and tested). Python 3.11+ to run from source.
 
 ## Known limits
 
@@ -116,3 +132,15 @@ packaging.
 - **`Format_ARGB32` / `Format_RGB32` assume a little-endian host.** True on
   every desktop that matters; there is an endian-safe fallback in
   `rendering.py` anyway.
+
+More in CLAUDE.md under "Known limits".
+
+## License
+
+SilverbowPDF is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License, version 3 or (at your option) any
+later version. See [LICENSE](LICENSE).
+
+It uses PySide6 / Qt (LGPL v3), pypdfium2 and PDFium (Apache 2.0 / BSD),
+pikepdf (MPL 2.0) with qpdf (Apache 2.0), and the winrt bridge (MIT), each
+under its own license. The installer bundles them.
