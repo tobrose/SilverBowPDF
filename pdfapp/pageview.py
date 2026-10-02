@@ -1791,6 +1791,11 @@ class PdfView(QScrollArea):
             page.apply_view_state(self._scale, self._rotation)
             page.setCursor(self._tool_cursor())
             self._layout.addWidget(page, 0, Qt.AlignHCenter)
+            # Shown now, not by Qt's deferred show for children added to a
+            # visible parent: until then the layout skips them as hidden and
+            # sizes the column to the viewport, so the first paint found
+            # EVERY page stacked on screen and rendered the whole document.
+            page.show()
             self._pages.append(page)
         self._layout.addStretch(1)
         self.pages_rebuilt.emit()

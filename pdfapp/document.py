@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -23,6 +24,13 @@ from .transform import PageTransform, normalize_rotation
 # (measured: 0xCCD7FF came out peach). tests/test_annots checks the tint.
 FIELD_HIGHLIGHT = 0xFFD7CC
 FIELD_HIGHLIGHT_ALPHA = 90
+
+# Loaded pdfium pages kept open, across all sources. A page that has been
+# rendered holds its decoded images until it's closed -- ~8MB a page for a
+# 300 DPI scan, measured -- so keeping every page ever shown open made an
+# 80-page scan cost 800MB once scrolled through. On a shared multi-session host
+# that's per user. Enough for what's on screen plus the sidebar's renders.
+PAGE_CACHE_LIMIT = 12
 
 _ANNOT_KINDS = {
     getattr(pdfium_c, f"FPDF_ANNOT_{name.upper()}"): name
@@ -57,8 +65,8 @@ class _Source:
     page_count: int
     has_forms: bool
     form_type: int = 0
-    page_cache: dict = field(default_factory=dict)  # source index -> PdfPage
-    text_cache: dict = field(default_factory=dict)  # source index -> _PageText
+    page_cache: dict = field(default_factory=dict)  # source index -> PdfPage (see _page)
+    text_cache: dict = field(default_factory=dict)  # source index -> _PageText, on a cached page
 
 
 @dataclass
@@ -118,6 +126,11 @@ class PdfDocument:
         self._widgets: Dict[PageKey, Tuple[Widget, ...]] = {}
         self._ocr = OcrEdits()
         self._ocr_pages: Dict[PageKey, tuple] = {}  # key -> (words, _PageText, page, pdf)
+        # (file, source page) of every open page, least recently used first.
+        self._loaded: "OrderedDict[PageKey, None]" = OrderedDict()
+        # Page geometry outlives the page: widget_transform asks for it on
+        # every paint and mouse move, and must not reload an evicted page.
+        self._geometry: Dict[PageKey, tuple] = {}  # key -> (media, box, intrinsic rotation)
         self._closed = False
 
     # ---- lifecycle -----------------------------------------------------
@@ -133,6 +146,7 @@ class PdfDocument:
                 text.textpage.close()
             source.text_cache.clear()
             source.page_cache.clear()
+            self._loaded.clear()
             try:
                 source.pdf.close()
             except Exception:
@@ -528,9 +542,28 @@ class PdfDocument:
 
     def page_geometry(self, index: int):
         """(MediaBox, CropBox, intrinsic /Rotate) with inheritance resolved."""
-        page = self._page(index)
-        media = tuple(float(v) for v in page.get_mediabox())
-        return media, self.page_box(index), int(page.get_rotation())
+        return self._page_geometry(index)
+
+    def _page_geometry(self, index: int):
+        if self._closed:
+            raise DocumentError("document is closed")
+        key = self.page_key(index)
+        geometry = self._geometry.get(key)
+        if geometry is None:
+            page = self._page(index)
+            media = tuple(float(v) for v in page.get_mediabox())
+            try:
+                box = tuple(float(v) for v in page.get_cropbox())
+            except Exception:
+                box = media
+            if box[2] - box[0] == 0 or box[3] - box[1] == 0:
+                box = media
+            try:
+                rotation = int(page.get_rotation())
+            except Exception:
+                rotation = 0
+            geometry = self._geometry[key] = (media, box, rotation)
+        return geometry
 
     @property
     def has_forms(self) -> bool:
@@ -565,23 +598,29 @@ class PdfDocument:
         if not 0 <= index < self.page_count:
             raise IndexError(f"page {index} out of range (0..{self.page_count - 1})")
         ref = self._pages[index]
+        key = (ref.file, ref.source)
         source = self._sources[ref.file]
         page = source.page_cache.get(ref.source)
-        if page is None:
-            page = source.pdf[ref.source]
-            source.page_cache[ref.source] = page
+        if page is not None:
+            self._loaded.move_to_end(key)
+            return page
+        page = source.pdf[ref.source]
+        source.page_cache[ref.source] = page
+        self._loaded[key] = None
+        # Evict the least recently used. Safe because no caller keeps a page
+        # (or its text page) across a call that loads a different one.
+        while len(self._loaded) > PAGE_CACHE_LIMIT:
+            (file, number), _ = self._loaded.popitem(last=False)
+            old = self._sources[file]
+            text = old.text_cache.pop(number, None)
+            if text is not None:
+                text.textpage.close()
+            old.page_cache.pop(number).close()
         return page
 
     def page_box(self, index: int) -> Tuple[float, float, float, float]:
         """The CropBox in PDF user space, unrotated. Falls back to MediaBox."""
-        page = self._page(index)
-        try:
-            box = tuple(float(v) for v in page.get_cropbox())
-        except Exception:
-            box = tuple(float(v) for v in page.get_mediabox())
-        if box[2] - box[0] == 0 or box[3] - box[1] == 0:
-            box = tuple(float(v) for v in page.get_mediabox())
-        return box  # type: ignore[return-value]
+        return self._page_geometry(index)[1]
 
     def page_rotation(self, index: int) -> int:
         """The page's own /Rotate plus any edit rotation, degrees clockwise.
@@ -590,10 +629,7 @@ class PdfDocument:
         built from it matches what pdfium renders now and what the file will
         contain later.
         """
-        try:
-            intrinsic = int(self._page(index).get_rotation())
-        except Exception:
-            intrinsic = 0
+        intrinsic = self._page_geometry(index)[2]
         return normalize_rotation(intrinsic + self._pages[index].rotation)
 
     def transform(

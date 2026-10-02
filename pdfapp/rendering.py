@@ -48,7 +48,9 @@ def bitmap_to_qimage(bitmap) -> QImage:
     The copy is deliberate: the pdfium bitmap is closed immediately after
     rendering, and a QImage constructed over a foreign buffer does not take
     ownership. Skipping the copy here buys a dangling pointer and a crash that
-    only shows up under memory pressure.
+    only shows up under memory pressure. It's the ONLY copy, though: the
+    QImage views pdfium's buffer directly until .copy() detaches it -- at
+    800% a page is ~120MB, and a bytes() copy first made a third one.
     """
     mode = getattr(bitmap, "mode", None)
     fmt = _MODE_TO_FORMAT.get(mode)
@@ -58,10 +60,20 @@ def bitmap_to_qimage(bitmap) -> QImage:
             f"Add it to _MODE_TO_FORMAT in rendering.py."
         )
 
-    data = bytes(bitmap.buffer)
-    image = QImage(data, bitmap.width, bitmap.height, bitmap.stride, fmt)
-    # .copy() detaches from `data` before it goes out of scope.
+    view = memoryview(bitmap.buffer).cast("B")
+    image = QImage(view, bitmap.width, bitmap.height, bitmap.stride, fmt)
+    # .copy() detaches from pdfium's buffer before the caller closes the bitmap.
     return image.copy()
+
+
+# What the page view keeps rendered. A count alone doesn't bound memory: a
+# page is ~2MB at 100% but ~120MB at 800% (measured 1.4GB for 12 at 800%,
+# per user on a shared multi-session host). Over budget, images at other zoom levels
+# go first, then the least recently used -- but never the newest two, which
+# may both be on screen (a page break), or every repaint would re-render.
+CACHE_BYTES = 128 * 1024 * 1024
+CACHE_PAGES = 64
+_ALWAYS_KEEP = 2
 
 
 class PageRenderer:
@@ -73,10 +85,13 @@ class PageRenderer:
     interface is shaped so that swap doesn't touch the widgets.
     """
 
-    def __init__(self, document: PdfDocument, max_pages: int = 12):
+    def __init__(self, document: PdfDocument, max_pages: int = CACHE_PAGES,
+                 max_bytes: int = CACHE_BYTES):
         self.document = document
-        self.max_pages = max_pages
+        self.max_pages = max_pages  # 0: keep nothing
+        self.max_bytes = max_bytes
         self._cache: "OrderedDict[tuple, QImage]" = OrderedDict()
+        self._bytes = 0
 
     def _key(self, index: int, scale: float, rotation: int) -> tuple:
         # Quantise the scale so that float noise from fit calculations doesn't
@@ -110,9 +125,27 @@ class PageRenderer:
 
         image = self._render(index, scale, view_rotation, for_print=False)
         self._cache[key] = image
-        while len(self._cache) > self.max_pages:
-            self._cache.popitem(last=False)
+        self._bytes += image.sizeInBytes()
+        self._trim(key[1])
         return image
+
+    @property
+    def cached_bytes(self) -> int:
+        return self._bytes
+
+    def _trim(self, scale_key: int) -> None:
+        def over() -> bool:
+            return len(self._cache) > self.max_pages or (
+                self._bytes > self.max_bytes and len(self._cache) > _ALWAYS_KEEP)
+        for key in [k for k in self._cache if k[1] != scale_key]:
+            if not over():
+                return
+            self._drop(key)
+        while over():
+            self._drop(next(iter(self._cache)))
+
+    def _drop(self, key: tuple) -> None:
+        self._bytes -= self._cache.pop(key).sizeInBytes()
 
     def print_image(self, index: int, scale: float) -> QImage:
         """The page as it prints: every edit the screen shows (pages, marks,
@@ -145,6 +178,7 @@ class PageRenderer:
 
     def clear(self) -> None:
         self._cache.clear()
+        self._bytes = 0
 
 
 @functools.lru_cache(maxsize=32)
