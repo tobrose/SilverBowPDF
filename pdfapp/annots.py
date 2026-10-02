@@ -80,6 +80,23 @@ def describe_annot(annot: "Annot") -> str:
 
 
 @dataclass(frozen=True)
+class SignatureImage:
+    """A picture of a handwritten signature, ready for a PDF image: 8-bit
+    RGB and alpha planes, each zlib-compressed -- FlateDecode as they stand,
+    so the writer embeds them without decoding anything. sigimage.py makes
+    one from an image file (Qt); nothing here needs a library."""
+
+    width: int
+    height: int
+    rgb: bytes     # zlib of width * height * 3 bytes
+    alpha: bytes   # zlib of width * height bytes
+
+    @property
+    def aspect(self) -> float:
+        return self.width / self.height
+
+
+@dataclass(frozen=True)
 class Annot:
     """One editable annotation, in the PDF user space of its page.
 
@@ -109,6 +126,8 @@ class Annot:
     ink: Ink annotations: strokes, each a flat (x, y, x, y, ...) tuple.
     label, sublabel, stamp_name: stamps: the big word, the small name/date
         line, and the /Name viewers use to identify the stamp type.
+    image: a stamp that shows a signature picture instead of a label (the
+        picture signature -- Acrobat's "Fill & Sign"). No certificate.
     """
 
     kind: str
@@ -134,6 +153,7 @@ class Annot:
     label: str = ""
     sublabel: str = ""
     stamp_name: str = ""
+    image: Optional[SignatureImage] = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "rect", normalize_rect(tuple(float(v) for v in self.rect)))
@@ -400,6 +420,37 @@ def new_stamp(label: str, sublabel: str, x: float, y: float, author: str, color,
     return Annot("Stamp", rect, contents=label, author=author, color=color,
                  text_rotation=rotation, label=label, sublabel=sublabel, stamp_name=name,
                  uid=next(_uids))
+
+
+SIGNATURE_WIDTH = 144.0  # points (2 in): a picture signature placed with a click
+
+
+def new_signature_image(image: SignatureImage, box: Rect, author: str,
+                        rotation: int) -> Annot:
+    """A picture signature fitted (aspect kept) and centred in `box` (PDF
+    space), reading upright on a page shown at `rotation`."""
+    x0, y0, x1, y1 = normalize_rect(box)
+    bw, bh = x1 - x0, y1 - y0
+    if rotation % 180:
+        bw, bh = bh, bw  # the box as read on screen
+    w = min(bw, bh * image.aspect)
+    h = w / image.aspect
+    if rotation % 180:
+        w, h = h, w
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    return Annot("Stamp", (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2),
+                 contents="Signature", author=author, color=(0.0, 0.0, 0.0),
+                 text_rotation=rotation, stamp_name="Signature", image=image,
+                 uid=next(_uids))
+
+
+def signature_click_box(image: SignatureImage, x: float, y: float, rotation: int) -> Rect:
+    """The box a click places a picture signature in: SIGNATURE_WIDTH wide
+    as read, centred on the click."""
+    w, h = SIGNATURE_WIDTH, SIGNATURE_WIDTH / image.aspect
+    if rotation % 180:
+        w, h = h, w
+    return (x - w / 2, y - h / 2, x + w / 2, y + h / 2)
 
 
 def new_markup(kind: str, rects: Iterable[Rect], author: str,

@@ -13,6 +13,9 @@ dependencies = [
     "PySide6>=6.6",
     "pypdfium2>=4.30",
     "pikepdf>=8.0",
+    # Certificate signatures (user approved 2026-10-02): PAdES signing as an
+    # incremental update, and checking signatures. Brings cryptography.
+    "pyhanko>=0.37",
     # Windows' own OCR engine (Tools > Recognize Text). ~3MB; the engine and
     # its languages come with Windows.
     "winrt-runtime>=3.2; sys_platform == 'win32'",

@@ -172,6 +172,13 @@ class PdfDocument:
     def is_encrypted(self) -> bool:
         return self.access().encrypted
 
+    def signature_count(self) -> int:
+        """Digital signatures in the opened file (pdfium counts them; checking
+        them is pdfsign's job). Saving rewrites the file and breaks them."""
+        if self._closed:
+            raise DocumentError("document is closed")
+        return max(0, pdfium_c.FPDF_GetSignatureCount(self._sources[0].pdf))
+
     def add_source(self, path: str | Path, password: Optional[str] = None) -> int:
         """Open another PDF to take pages from. Returns its file index.
 

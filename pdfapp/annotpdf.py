@@ -33,6 +33,7 @@ from .annots import (
     STAMP_SIZE,
     STAMP_SUBSIZE,
     Annot,
+    SignatureImage,
     is_editable,
     stamp_size,
     text_box_size,
@@ -295,6 +296,32 @@ def _stamp_appearance(pdf: pikepdf.Pdf, annot: Annot) -> pikepdf.Stream:
                  resources=Dictionary(Font=fonts))
 
 
+def image_xobject(pdf: pikepdf.Pdf, image: SignatureImage) -> pikepdf.Stream:
+    """An image XObject with a soft mask, from planes that are already
+    Flate-compressed: the data goes in as it is, never re-encoded."""
+    def plane(data: bytes, space: Name) -> pikepdf.Stream:
+        s = pikepdf.Stream(pdf, data)
+        s.Type, s.Subtype = Name.XObject, Name.Image
+        s.Width, s.Height, s.BitsPerComponent = image.width, image.height, 8
+        s.ColorSpace, s.Filter = space, Name.FlateDecode
+        return s
+    picture = plane(image.rgb, Name.DeviceRGB)
+    picture.SMask = plane(image.alpha, Name.DeviceGray)
+    return picture
+
+
+def _signature_image_appearance(pdf: pikepdf.Pdf, annot: Annot) -> pikepdf.Stream:
+    """The picture, filling its box as read; upright on the page as
+    displayed (the same counter-rotation as stamps and text boxes)."""
+    x0, y0, x1, y1 = annot.rect
+    w, h = x1 - x0, y1 - y0
+    if annot.text_rotation % 180:
+        w, h = h, w
+    return _form(pdf, f"q {w:.3f} 0 0 {h:.3f} 0 0 cm /Im0 Do Q".encode(), (0, 0, w, h),
+                 matrix=_COUNTER_ROTATION[annot.text_rotation % 360],
+                 resources=Dictionary(XObject=Dictionary(Im0=image_xobject(pdf, annot.image))))
+
+
 def _common(annot: Annot, subtype: str) -> Dictionary:
     now = pdf_date()
     return Dictionary(
@@ -369,6 +396,11 @@ def build_annot(pdf: pikepdf.Pdf, annot: Annot) -> pikepdf.Object:
         _stroke_style(d, annot)
         d.InkList = Array([Array(list(stroke)) for stroke in annot.ink])
         d.AP = Dictionary(N=_ink_appearance(pdf, annot))
+        return pdf.make_indirect(d)
+    if annot.kind == "Stamp" and annot.image is not None:
+        d = _common(annot, "Stamp")
+        d.Name = Name("/" + (annot.stamp_name or "Signature"))
+        d.AP = Dictionary(N=_signature_image_appearance(pdf, annot))
         return pdf.make_indirect(d)
     if annot.kind == "Stamp":
         d = _common(annot, "Stamp")
