@@ -107,6 +107,6 @@ survive logoff.
 |---|---|---|
 | `SingleKeyShortcuts` | DWORD | `0` locks single-letter tool shortcuts (V, H, T, ...) off; `1` locks them on. Absent: off by default, and users may turn them on in the Tools menu. Ctrl shortcuts are never affected. |
 
-Set it by GPO (Registry preference), a deployment tool, or the installer task
-`lockletterkeys` (`/TASKS="lockletterkeys"` for a silent install).
+Set it by GPO (Registry preference) or any endpoint-management tool. The installer doesn't set
+it: the shortcuts are off by default, which is usually all that's needed.
 

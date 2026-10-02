@@ -69,11 +69,9 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; \
 Name: "associate"; Description: "Make {#AppName} the default app for .pdf files"; \
     GroupDescription: "File associations:"; Flags: unchecked
 
-; Single-letter tool shortcuts are off by default already; this LOCKS them
-; off so users can't turn them on (the Tools menu shows "set by
-; administrator"). Silent install: add /TASKS="lockletterkeys".
-Name: "lockletterkeys"; Description: "Lock single-letter tool shortcuts off for all users"; \
-    GroupDescription: "Administrator policy:"; Flags: unchecked
+; No task for the single-letter shortcut policy (removed, user's call): the
+; shortcuts are off by default, which is enough. IT can still lock them
+; through HKLM\Software\Policies\SilverbowPDF by GPO -- see docs/PACKAGING.md.
 
 [Files]
 ; PyInstaller onedir output. Everything under dist\SilverbowPDF\.
@@ -111,11 +109,6 @@ Root: HKA; Subkey: "Software\Classes\SilverbowPDF.Document\shell\open\command"; 
 Root: HKA; Subkey: "Software\Classes\.pdf"; \
     ValueType: string; ValueName: ""; ValueData: "SilverbowPDF.Document"; \
     Flags: uninsdeletevalue; Tasks: associate
-
-; Policy lives under HKLM\Software\Policies so GPO or deployment tooling can set the same
-; value without the installer. See docs/PACKAGING.md.
-Root: HKLM; Subkey: "Software\Policies\{#AppName}"; ValueType: dword; \
-    ValueName: "SingleKeyShortcuts"; ValueData: 0; Flags: uninsdeletekey; Tasks: lockletterkeys
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; \
