@@ -50,7 +50,9 @@ from .annots import (
     new_markup,
     new_shape,
     new_stamp,
+    new_signature_image,
     new_text,
+    signature_click_box,
     text_box_size,
     without,
 )
@@ -106,6 +108,8 @@ class Tool(Enum):
     FIELD_MULTILINE = "field_multiline"
     FIELD_CHECKBOX = "field_checkbox"
     FIELD_COMBO = "field_combo"
+    SIGN = "sign"               # certificate signature: drag its box, then MainWindow signs
+    SIGNATURE = "signature"     # picture signature: an image stamp, no certificate
 
 
 # Tools that mark text: drag across it, a markup annotation lands on release.
@@ -121,6 +125,9 @@ RESIZABLE_SHAPES = ("Square", "Circle")
 FIELD_TOOLS = {Tool.FIELD_TEXT: (TEXT, False), Tool.FIELD_MULTILINE: (TEXT, True),
                Tool.FIELD_CHECKBOX: (CHECKBOX, False), Tool.FIELD_COMBO: (COMBO, False)}
 FORM_TOOLS = (Tool.FORM, *FIELD_TOOLS)
+# Drag a box (or click for a standard size); both return to Select after.
+SIGN_TOOLS = (Tool.SIGN, Tool.SIGNATURE)
+SIGN_BOX = (216.0, 72.0)  # points, as read: a certificate signature placed with a click
 
 _EDGE_CURSORS = {
     "l": Qt.SizeHorCursor, "r": Qt.SizeHorCursor, "t": Qt.SizeVerCursor, "b": Qt.SizeVerCursor,
@@ -426,6 +433,7 @@ class PdfView(QScrollArea):
     highlight_color_changed = Signal(object)   # picked on the mark bar
     text_style_changed = Signal()              # text_size / text_color, picked on the style bar
     text_layer_changed = Signal()              # pages gained or lost recognised (OCR) text
+    signature_box = Signal(int, object)        # page index, PDF rect: sign with a certificate there
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -452,6 +460,7 @@ class PdfView(QScrollArea):
         # it and gates every edit; this keeps the page from offering (a drag,
         # the mark bar, a field to type in) what would then be refused.
         self.access = FULL_ACCESS
+        self.signature_image = None  # SignatureImage the picture-signature tool places
         self.highlight_color = HIGHLIGHT_COLORS["Yellow"]
         self.text_size = 12.0
         self.text_color = TEXT_COLORS["Black"]
@@ -509,7 +518,7 @@ class PdfView(QScrollArea):
         if self._tool is Tool.PAN:
             return Qt.OpenHandCursor
         if self._tool is Tool.NOTE or self._tool in DRAW_TOOLS or self._tool is Tool.STAMP \
-                or self._tool in FIELD_TOOLS:
+                or self._tool in FIELD_TOOLS or self._tool in SIGN_TOOLS:
             return Qt.CrossCursor
         if self._tool in MARKUP_TOOLS or self._tool in TEXT_TOOLS:
             return Qt.IBeamCursor
@@ -787,6 +796,9 @@ class PdfView(QScrollArea):
         if self._tool in FIELD_TOOLS:
             self._drag = {"mode": "fdraw", "page": page, "press": pos, "end": None}
             return True
+        if self._tool in SIGN_TOOLS:
+            self._drag = {"mode": "sigbox", "page": page, "press": pos, "end": None}
+            return True
         if self._tool is Tool.FORM:
             return self._form_press(page, pos)
         if self._tool in DRAW_TOOLS:
@@ -844,7 +856,8 @@ class PdfView(QScrollArea):
         if drag is not None and event.buttons() & Qt.LeftButton and drag["page"] is page:
             started = drag.get("delta") is not None or drag.get("anchor") is not None \
                 or drag.get("end") is not None or drag.get("rect") is not None
-            if drag["mode"] in ("fdraw", "fmove", "fresize") and drag.get("end") is not None:
+            if drag["mode"] in ("fdraw", "fmove", "fresize", "sigbox") \
+                    and drag.get("end") is not None:
                 started = True
             if not started and \
                     (pos - drag["press"]).manhattanLength() < QApplication.startDragDistance():
@@ -853,7 +866,7 @@ class PdfView(QScrollArea):
                 drag["rect"] = self._resized_rect(page, drag, pos)
                 page.update()
                 return True
-            if drag["mode"] in ("fdraw", "fmove", "fresize"):
+            if drag["mode"] in ("fdraw", "fmove", "fresize", "sigbox"):
                 drag["end"] = pos
                 page.update()
                 return True
@@ -926,6 +939,10 @@ class PdfView(QScrollArea):
             return False
         if drag["mode"] == "fdraw":
             self._create_field(page, drag)
+            page.update()
+            return True
+        if drag["mode"] == "sigbox":
+            self._finish_sign_box(page, drag)
             page.update()
             return True
         if drag["mode"] in ("fmove", "fresize"):
@@ -1083,6 +1100,32 @@ class PdfView(QScrollArea):
                               "Add Stamp")
         self.select_annot(page.index, stamp.ident)
         self.set_tool(Tool.SELECT)  # like a note: one stamp per pick
+
+    # -- signatures: drag a box, or click for a standard size
+
+    def _finish_sign_box(self, page: "PageWidget", drag) -> None:
+        doc = self.document
+        rotation = doc.page_rotation(page.index)
+        a, b = drag["press"], drag["end"]
+        tool = self._tool
+        if b is not None and abs(b.x() - a.x()) >= 8 and abs(b.y() - a.y()) >= 8:
+            rect = page.widget_transform().widget_rect_to_pdf(
+                (min(a.x(), b.x()), min(a.y(), b.y()), max(a.x(), b.x()), max(a.y(), b.y())))
+        else:
+            x, y = page.pdf_point_at(a)
+            if tool is Tool.SIGNATURE:
+                rect = signature_click_box(self.signature_image, x, y, rotation)
+            else:
+                w, h = SIGN_BOX if rotation % 180 == 0 else SIGN_BOX[::-1]
+                rect = (x - w / 2, y - h / 2, x + w / 2, y + h / 2)
+        self.set_tool(Tool.SELECT)  # one signature per pick, like a stamp
+        if tool is Tool.SIGNATURE:
+            signature = new_signature_image(self.signature_image, rect, self.author, rotation)
+            self.annots_edit.emit(doc.page_key(page.index),
+                                  doc.page_annots(page.index) + (signature,), "Add Signature")
+            self.select_annot(page.index, signature.ident)
+        else:
+            self.signature_box.emit(page.index, rect)
 
     # -- resizing text boxes and shapes (widget space; see _resize_hit)
 
@@ -1614,6 +1657,14 @@ class PdfView(QScrollArea):
         if drag is not None and drag["mode"] == "draw" and drag["page"] is page \
                 and drag["end"] is not None:
             self._paint_drawing(page, painter, drag)
+        if drag is not None and drag["mode"] == "sigbox" and drag["page"] is page \
+                and drag["end"] is not None:
+            a, b = drag["press"], drag["end"]
+            box = QRectF(QPointF(min(a.x(), b.x()), min(a.y(), b.y())),
+                         QPointF(max(a.x(), b.x()), max(a.y(), b.y())))
+            painter.fillRect(box, QColor(40, 110, 230, 30))
+            painter.setPen(QPen(QColor(40, 110, 230), 1.5, Qt.DashLine))
+            painter.drawRect(box)
         if drag is not None and drag["mode"] == "resize" and drag["page"] is page \
                 and drag["rect"] is not None:
             left, top, right, bottom = drag["rect"]

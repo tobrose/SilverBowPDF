@@ -18,7 +18,7 @@ touch the real registry.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional
 
 from PySide6.QtCore import QSettings
 
@@ -26,6 +26,9 @@ USER_KEY = "SilverbowPDF"
 POLICY_PATH = r"HKEY_LOCAL_MACHINE\Software\Policies\SilverbowPDF"
 
 LETTER_SHORTCUTS = "SingleKeyShortcuts"  # 1 on, 0 off (default: off)
+SIGNATURE_PICTURE = "SignaturePicture"   # path of the user's signature image
+DIGITAL_ID_FILES = "DigitalIdFiles"      # .pfx files used before, newest first
+SIGNING_REASON = "SigningReason"
 
 
 def user_settings() -> QSettings:
@@ -78,4 +81,32 @@ class Settings:
         if self.letter_shortcuts().locked:
             raise PermissionError("letter shortcuts are set by administrator policy")
         self._user.setValue(LETTER_SHORTCUTS, 1 if enabled else 0)
+        self._user.sync()
+
+    # Signing conveniences. Per user (HKCU): on a non-persistent desktop they
+    # may not survive logoff, which costs a re-pick, never a wrong signature.
+
+    def signature_picture(self) -> str:
+        return str(self._user.value(SIGNATURE_PICTURE) or "")
+
+    def set_signature_picture(self, path: str) -> None:
+        self._user.setValue(SIGNATURE_PICTURE, path)
+        self._user.sync()
+
+    def digital_id_files(self) -> List[str]:
+        value = self._user.value(DIGITAL_ID_FILES) or []
+        if isinstance(value, str):  # QSettings hands back a lone value as a string
+            value = [value]
+        return [v for v in value if v]
+
+    def remember_digital_id_file(self, path: str) -> None:
+        paths = [p for p in self.digital_id_files() if p.lower() != path.lower()]
+        self._user.setValue(DIGITAL_ID_FILES, [path] + paths[:9])
+        self._user.sync()
+
+    def signing_reason(self) -> str:
+        return str(self._user.value(SIGNING_REASON) or "")
+
+    def set_signing_reason(self, reason: str) -> None:
+        self._user.setValue(SIGNING_REASON, reason)
         self._user.sync()

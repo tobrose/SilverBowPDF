@@ -339,6 +339,158 @@ def test_windows_cng_signing():
         assert len(roots) > 5, "Windows' trusted roots"
 
 
+# ---- in the app ------------------------------------------------------------
+
+from contextlib import contextmanager  # noqa: E402
+
+from PySide6.QtCore import QEvent, QPoint, QSettings  # noqa: E402
+from PySide6.QtGui import QMouseEvent  # noqa: E402
+
+from pdfapp.pageview import Tool  # noqa: E402
+from pdfapp.settings import Settings  # noqa: E402
+
+
+@contextmanager
+def _app_window(tmp, pdf_path, password=None):
+    import pdfapp.mainwindow as mw
+    ini = lambda name: QSettings(str(Path(tmp, name)), QSettings.IniFormat)  # noqa: E731
+    w = mw.MainWindow(Settings(ini("user.ini"), ini("policy.ini")))
+    w.resize(900, 700)
+    w.show()
+    try:
+        w.view.set_document(PdfDocument(pdf_path, password=password))
+        for _ in range(5):
+            _app.processEvents()
+        yield w
+    finally:
+        w.view.set_document(None)
+        w.close()
+
+
+@contextmanager
+def _patched(**names):
+    import pdfapp.mainwindow as mw
+    saved = {k: getattr(mw, k) for k in names}
+    for k, v in names.items():
+        setattr(mw, k, v)
+    try:
+        yield
+    finally:
+        for k, v in saved.items():
+            setattr(mw, k, v)
+
+
+def _fake_sign_dialog(pfx, password, picture=None):
+    """Stands in for the Sign dialog: picks the given .pfx and accepts."""
+    class Fake:
+        def __init__(self, parent, settings, current_picture, windows_ids, hwnd):
+            self.windows_ids = windows_ids
+            self.picture, self.picture_path = picture, None
+
+        def exec(self):
+            from PySide6.QtWidgets import QDialog
+            self.signer = digitalid.pfx_signer(pfx, password)
+            self.identity = digitalid.DigitalID(digitalid.PFX, "Jane Tester", path=pfx)
+            self.look = _look(image=self.picture)
+            return QDialog.Accepted
+    return Fake
+
+
+def _drag_on_page(view, a: QPoint, b: QPoint):
+    page = view._pages[0]
+    ev = lambda kind, pos, button, buttons: QMouseEvent(  # noqa: E731
+        kind, QPointF(pos), QPointF(page.mapToGlobal(pos)), button, buttons, Qt.NoModifier)
+    view.page_mouse_press(page, ev(QEvent.MouseButtonPress, a, Qt.LeftButton, Qt.LeftButton))
+    view.page_mouse_move(page, ev(QEvent.MouseMove, b, Qt.NoButton, Qt.LeftButton))
+    view.page_mouse_release(page, ev(QEvent.MouseButtonRelease, b, Qt.LeftButton, Qt.NoButton))
+
+
+def test_sign_with_certificate_in_the_app():
+    with tempfile.TemporaryDirectory() as tmp:
+        src, signed = Path(tmp, "contract.pdf"), Path(tmp, "contract-signed.pdf")
+        _plain_pdf(src)
+        original = src.read_bytes()
+        pfx, pw = _id(tmp)
+        with _app_window(tmp, src) as w, _patched(
+                SignDialog=_fake_sign_dialog(pfx, pw, from_qimage(_scanned_signature())),
+                choose_picture=lambda *a: None):
+            w._ask_save_path = lambda title, suggested: signed
+            w.act_sign_cert.trigger()  # the real menu action
+            assert w.view.tool is Tool.SIGN
+            _drag_on_page(w.view, QPoint(300, 600), QPoint(560, 680))
+            assert w.view.tool is Tool.SELECT, "one signature per pick"
+            assert w.view.document.path == signed, "the signed copy is now open"
+            assert signed.read_bytes().startswith(original), "incremental: nothing rewritten"
+            assert w.signature_bar.isVisible() and "Signed by Jane Tester" in w.signature_text.text()
+            assert len(w._signature_infos) == 1
+            assert w._signature_infos[0].level == pdfsign.UNTRUSTED, w._signature_infos
+
+            # Sign it again, untouched: the first signature must survive.
+            twice = Path(tmp, "twice.pdf")
+            w._ask_save_path = lambda title, suggested: twice
+            w.view.signature_box.emit(0, (72, 100, 280, 160))
+            assert [i.level for i in w._signature_infos] == [pdfsign.UNTRUSTED] * 2
+            assert "2 signatures" in w.signature_text.text()
+
+
+def test_saving_a_signed_document_warns_and_save_as_keeps_it_valid():
+    with tempfile.TemporaryDirectory() as tmp:
+        src, signed = Path(tmp, "c.pdf"), Path(tmp, "signed.pdf")
+        _plain_pdf(src)
+        pfx, pw = _id(tmp)
+        pdfsign.sign(src, None, signed, 0, (300, 100, 540, 180), 0, _look(),
+                     digitalid.pfx_signer(pfx, pw))
+        warned = []
+
+        class Box:
+            Save, Cancel = 1, 0
+
+            @staticmethod
+            def warning(parent, title, text, *a):
+                warned.append(text)
+                return Box.Cancel
+        with _app_window(tmp, signed) as w, _patched(QMessageBox=Box):
+            # Untouched Save As: a byte copy, still validly signed.
+            copy = Path(tmp, "copy.pdf")
+            w._ask_save_path = lambda title, suggested: copy
+            assert w.save_as()
+            assert copy.read_bytes() == signed.read_bytes() and not warned
+            assert w._signature_infos[0].level == pdfsign.UNTRUSTED, "still intact"
+            # An edit, then Save: warned first, and Cancel keeps the file as it was.
+            w.rotate_pages([0], 90)
+            before = copy.read_bytes()
+            assert not w.save()
+            assert warned and "signature" in warned[0] and copy.read_bytes() == before
+
+
+def test_picture_signature_tool_in_the_app():
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp, "c.pdf")
+        _plain_pdf(src)
+        picture = Path(tmp, "my-signature.png")
+        _scanned_signature().save(str(picture))
+        with _app_window(tmp, src) as w:
+            w.settings.set_signature_picture(str(picture))
+            w.act_sign_picture.trigger()
+            assert w.view.tool is Tool.SIGNATURE, "the remembered picture is used"
+            _drag_on_page(w.view, QPoint(200, 500), QPoint(420, 580))
+            (stamp,) = [a for a in w.view.document.page_annots(0) if a.image is not None]
+            assert w.history.undo_label() == "Add Signature" and w.view.tool is Tool.SELECT
+
+
+def test_restricted_document_blocks_signing():
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp, "locked.pdf")
+        _plain_pdf(src, encryption=pikepdf.Encryption(
+            user="", owner="own", allow=pikepdf.Permissions(modify_annotation=False,
+                                                            modify_other=False,
+                                                            modify_form=False)))
+        with _app_window(tmp, src) as w:
+            assert not w.act_sign_cert.isEnabled() and not w.act_sign_picture.isEnabled()
+            w.view.signature_box.emit(0, (100, 100, 300, 160))  # a request no button stops
+            assert w.view.document.path == src and not w.history.can_undo()
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

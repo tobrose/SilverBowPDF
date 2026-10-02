@@ -1,6 +1,6 @@
 # SilverbowPDF
 
-Desktop PDF viewer and editor. Python 3.11+ / PySide6 / pdfium.
+Desktop PDF viewer and editor. Python 3.11+ / PySide6 / pdfium / pikepdf / pyHanko.
 
 Built by a solo developer with no code reviewer and no rollback buddy. Assume
 every change ships straight to the only user who matters. Prefer loud failures
@@ -38,7 +38,7 @@ pdfapp/
                  page of one of its sources. Sources are only ever added.
                  Text layer (char_at/nearest_char/word_at/text_in/text_rects)
                  is pdfium's; char indices are pdfium's, ranges inclusive.
-  writer.py      The only code that writes PDFs. pikepdf. write to temp -> commit (os.replace).
+  writer.py      The only code that SAVES PDFs (signing appends; see pdfsign). pikepdf. write to temp -> commit (os.replace).
                  prune_dangling() drops bookmarks/links/fields/dests aimed at removed pages.
                  Foreign pages: plain append + _merge_forms, NOT add_pages_from (see rule 6).
   rendering.py   pdfium bitmap -> QImage, plus an LRU page cache.
@@ -60,6 +60,21 @@ pdfapp/
                  permission bits) and the protection values KEEP / REMOVE /
                  "<new open password>". No libs.
   protection.py  File > Password Protection dialog (Qt).
+  pdfsign.py     Certificate signatures (pyHanko): sign() appends an
+                 INCREMENTAL revision to the original bytes -- the one PDF
+                 write that isn't writer.py, because a rewrite breaks every
+                 earlier signature; check() validates against Windows' trust.
+                 Draws its own appearance (picture + text, counter-rotated).
+                 No Qt.
+  digitalid.py   DigitalID; self-made .pfx IDs (cryptography: RSA 3072,
+                 5 years) and their signer. No Qt.
+  wincert.py     Windows certificate store via ctypes: signing IDs (MY),
+                 trust (ROOT + TrustedPeople, CA), and a pyHanko Signer that
+                 signs through CNG (NCryptSignHash) so smart cards and
+                 non-exportable keys work; Windows shows any PIN prompt.
+  sigimage.py    Signature picture from a photo/scan (Qt): paper made
+                 transparent, trimmed, kept as zlib RGB + alpha planes.
+  signui.py      Sign dialog, Create Digital ID, signature details (Qt).
   findbar.py     Ctrl+F bar. Scans pages in 30ms timer slices from the current
                  page (find_text: pdfium search, throwaway text pages so a long
                  document isn't pinned in memory); the view paints the matches.
@@ -332,6 +347,26 @@ from a restricted file (no copying) can't be inserted elsewhere. Changing
 protection needs full access, so nobody strips restrictions by
 re-protecting. The self-test saves a protected file and re-protects one.
 
+Signatures (user's choices, 2026-10-02), Sign button / Tools > Sign:
+- Sign with a Certificate: drag (or click) a box, pick a digital ID --
+  Windows certificate store, a .pfx file, or Create a Digital ID (self-
+  signed .pfx in Documents\SilverbowPDF Digital IDs) -- optional picture,
+  reason, location, date. Asks where to save (default: over the same
+  file), then opens the signed file. Written as an incremental update,
+  PAdES, SHA-256. With no unsaved edits the original bytes are signed, so
+  earlier signatures stay valid; with edits, those are saved first
+  (warned: that breaks old signatures).
+- Signature Picture (Fill & Sign, no certificate): a Stamp annotation
+  showing the user's picture (remembered, HKCU), placed like a stamp,
+  undoable, saved like any annotation. Not a cryptographic signature.
+- On open, signatures are checked (pyHanko, no network): green bar if all
+  valid and trusted, yellow if valid but not trusted (self-signed IDs),
+  red if changed after signing or broken; Details... lists each.
+- Saving a signed document (normal save, qpdf rewrite) warns first that
+  the signatures will break; an untouched Save As copies the bytes.
+- Restricted files: signing follows the annotate permission.
+The self-test signs twice (.pfx and Windows CNG) and checks both.
+
 Next: nothing queued -- ask.
 
 Deployment target is shared multi-session desktops: no GPU, non-persistent
@@ -370,6 +405,18 @@ count on per-user settings surviving logoff.
   a file already has are kept on save and honoured.
 - Certificate (public-key) security isn't supported: pdfium can't open it.
 - Unlock lasts until the document is closed; the file keeps its restrictions.
+
+- Signature checks don't look up revocation (no network on open: opening
+  a PDF shouldn't stall on an OCSP server), so a revoked certificate still
+  shows as valid. No timestamps (TSA) are added when signing, and no
+  long-term validation data (LTV).
+- A picture signature moves but doesn't resize (place it again instead).
+- Signature appearances are Helvetica/WinAnsi like typed text: a name or
+  reason with characters outside cp1252 is left off the appearance (the
+  certificate still carries it). Lines that don't fit are dropped.
+- Signing always adds a new signature field where the box is drawn: an
+  empty signature field already in a form isn't signed by clicking it,
+  and creating empty signature fields for others isn't offered.
 
 - Rendering is synchronous. Fine for text; a 600 DPI scan at 400% hitches.
   The planned fix is moving `PageRenderer` onto a `QThreadPool`; the interface

@@ -20,6 +20,7 @@ PDF shouldn't stall on an OCSP server.
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -32,6 +33,12 @@ _COUNTER_ROTATION = {0: [1, 0, 0, 1, 0, 0], 90: [0, 1, -1, 0, 0, 0],
                      180: [-1, 0, 0, -1, 0, 0], 270: [0, -1, 1, 0, 0, 0]}
 REASONS = ("I am the author of this document", "I approve this document",
            "I have reviewed this document", "I agree to the terms defined in this document")
+
+# pyHanko logs a full traceback for every certificate it can't trust -- a
+# self-signed ID, on every open. check() reports that as UNTRUSTED, so the
+# log adds nothing; without a handler Python would print it to stderr.
+logging.getLogger("pyhanko").addHandler(logging.NullHandler())
+logging.getLogger("pyhanko_certvalidator").addHandler(logging.NullHandler())
 
 
 class SigningError(Exception):

@@ -44,6 +44,12 @@ datas += [(str(PROJECT_ROOT / "pdfapp" / "icon.png"), "pdfapp")]
 winrt_modules = collect_submodules("winrt")
 binaries += collect_dynamic_libs("winrt")
 
+# --- pyHanko (digital signatures) ----------------------------------------------
+# Pure Python plus cryptography, lxml and tzdata, which PyInstaller's
+# contrib hooks handle. Its data files are a few EU trust-list PEMs this app
+# doesn't use; taken anyway (tiny) so no lazy pyHanko path finds them missing.
+datas += collect_data_files("pyhanko")
+
 # --- pikepdf ---------------------------------------------------------------
 # Native _core extension plus the qpdf runtime it links against.
 binaries += collect_dynamic_libs("pikepdf")

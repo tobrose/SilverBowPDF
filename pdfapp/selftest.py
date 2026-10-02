@@ -170,6 +170,32 @@ def run(log_path: Optional[str] = None) -> int:
                     raise RuntimeError(f"{path.name} isn't encrypted")
         return f"{count} pages; saving keeps the password; a new one replaces it"
 
+    def signatures() -> str:
+        # pyHanko, cryptography and Windows' CNG/certificate store, frozen:
+        # make a .pfx ID, sign, sign again through Windows' own key API,
+        # check both. Also says how many signing certificates this user's
+        # Windows offers -- worth knowing where it's deployed.
+        import datetime as dt
+        from . import digitalid, pdfsign, wincert
+        pfx = work / "id.pfx"
+        digitalid.create_pfx_id(pfx, "Self Test", "pw")
+        look = pdfsign.Look("Self Test", dt.datetime.now(), reason=pdfsign.REASONS[1])
+        once, twice = work / "signed.pdf", work / "signed2.pdf"
+        pdfsign.sign(work / "plain.pdf", None, once, 0, (300, 100, 520, 170), 0, look,
+                     digitalid.pfx_signer(pfx, "pw"))
+        signer = wincert.imported_pfx_signer(pfx.read_bytes(), "pw")
+        pdfsign.sign(once, None, twice, 1, (300, 100, 520, 170), 90, look, signer)
+        mine = ([digitalid.pfx_signer(pfx, "pw").signing_cert], [])
+        levels = [i.level for i in pdfsign.check(twice, trust=mine)]
+        if levels != [pdfsign.OK, pdfsign.OK]:
+            raise RuntimeError(f"signatures checked {levels}, expected both ok")
+        windows = [i.level for i in pdfsign.check(twice)]  # Windows' roots don't know it
+        if windows != [pdfsign.UNTRUSTED] * 2:
+            raise RuntimeError(f"against Windows' roots: {windows}, expected untrusted")
+        roots, _ = wincert.trust_certificates()
+        return (f"signed twice (file ID, Windows CNG), both valid; {len(roots)} trusted "
+                f"roots; {len(wincert.list_ids())} signing certificate(s) for this user")
+
     def icon() -> str:
         from PySide6.QtGui import QIcon
         from pdfapp import ICON_FILE
@@ -188,6 +214,7 @@ def run(log_path: Optional[str] = None) -> int:
         step("OCR (Windows)", recognize)
         step("edit, merge, save, reopen", edit_and_save)
         step("open, save and re-protect an encrypted file", encrypted)
+        step("digital signatures (pyHanko, Windows CNG)", signatures)
 
     lines.append("")
     lines.append("RESULT: " + ("PASS" if failures == 0 else f"FAIL ({failures} step(s))"))

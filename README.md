@@ -8,6 +8,10 @@ for rendering and pikepdf (qpdf) for saving.
   shapes, freehand pen, stamps.
 - **Forms:** fill in fields, and create text fields, checkboxes and dropdowns.
 - **Scans:** make scanned pages searchable with Windows' built-in OCR.
+- **Signatures:** sign with a certificate (from Windows, a smart card, or a
+  digital ID file you create), with your signature picture on it, and see on
+  opening whether a document's signatures are valid. Or just place your
+  signature picture, Fill & Sign style.
 - **Find, print** (with preview), **password protection** (AES-256), and
   respect for the restrictions a PDF's author set.
 - Built to be deployed: a single-click installer with silent install, an
@@ -87,6 +91,9 @@ on a headless box.
 | `Ctrl` + scroll | Zoom at cursor |
 | Tools > Recognize Text (OCR) | Make scanned pages searchable and selectable (Windows' own OCR); save to keep it |
 | `Ctrl+F` | Find text; `Enter` / `F3` next, `Shift+Enter` / `Shift+F3` previous, `Esc` closes |
+| Sign > Sign with a Certificate | Drag a box where the signature goes, pick a digital ID (Windows certificate, `.pfx` file, or create one), save the signed copy |
+| Sign > Signature Picture | Place your signature picture (Fill & Sign); Sign > Choose Picture changes it |
+| Details… on the signature bar | Who signed, when, and whether the document changed since |
 | Pan button, or drag with the middle mouse button | Drag the page to scroll; `Esc` back to Select |
 
 Drag a PDF onto the window to open it.
@@ -101,6 +108,8 @@ pdfapp/
   fields.py        Form fields as data; formpdf.py writes them (pikepdf).
   ocrlayer.py      The invisible text layer OCR adds; ocr.py runs Windows OCR.
   security.py      What a protected PDF allows; protection.py is its dialog.
+  pdfsign.py       Certificate signing and checking (pyHanko); digitalid.py,
+                   wincert.py (Windows certificates), signui.py its dialogs.
   document.py      pypdfium2 wrapper. No Qt imports, testable headless.
   writer.py        Saves edits with pikepdf: temp file, verify, atomic replace.
   rendering.py     pdfium bitmap -> QImage, plus an LRU page cache.
@@ -154,5 +163,6 @@ the terms of the GNU General Public License, version 3 or (at your option) any
 later version. See [LICENSE](LICENSE).
 
 It uses PySide6 / Qt (LGPL v3), pypdfium2 and PDFium (Apache 2.0 / BSD),
-pikepdf (MPL 2.0) with qpdf (Apache 2.0), and the winrt bridge (MIT), each
+pikepdf (MPL 2.0) with qpdf (Apache 2.0), pyHanko (MIT) with cryptography
+(Apache 2.0 / BSD), and the winrt bridge (MIT), each
 under its own license. The installer bundles them.

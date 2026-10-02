@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import getpass
+import shutil
 from dataclasses import replace
 from pathlib import Path
 from typing import Optional
@@ -55,6 +56,10 @@ from .pagelist import History, PageList
 from .printing import (LOW_RES_DPI, PRINT_DPI, PrintError, available_printers,
                        default_printer, print_pages)
 from .printpreview import PrintPreview
+from . import pdfsign
+from .sigimage import SignatureImageError, load_signature_image
+from .signui import CreateIDDialog, SignaturesDialog, SignDialog, choose_picture
+from .signui import summary as signature_summary
 from .protection import SET, UNLOCK, ProtectionDialog
 from .security import FULL_ACCESS, KEEP, REMOVE, Access
 from .fields import (
@@ -122,10 +127,26 @@ class MainWindow(QMainWindow):
         unlock.clicked.connect(self.unlock)
         row.addWidget(unlock)
         self.restriction_bar.hide()
+        # Says whether the document's digital signatures check out.
+        self.signature_bar = QFrame(self)
+        self.signature_bar.setObjectName("signatures")
+        sig_row = QHBoxLayout(self.signature_bar)
+        sig_row.setContentsMargins(10, 5, 10, 5)
+        self.signature_text = QLabel(self.signature_bar)
+        self.signature_text.setWordWrap(True)
+        self.signature_text.setTextFormat(Qt.RichText)
+        sig_row.addWidget(self.signature_text, 1)
+        details = QPushButton("Details…", self.signature_bar)
+        details.clicked.connect(lambda: self.show_signatures())
+        sig_row.addWidget(details)
+        self.signature_bar.hide()
+        self._signature_infos: list = []
+        self._picture = None  # the user's signature picture, once loaded
         central = QWidget(self)
         column = QVBoxLayout(central)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(0)
+        column.addWidget(self.signature_bar)
         column.addWidget(self.restriction_bar)
         column.addWidget(self.find_bar)
         column.addWidget(self.view, 1)
@@ -267,6 +288,18 @@ class MainWindow(QMainWindow):
         self.act_field_multiline = tool("Multi-line Text Field", None, Tool.FIELD_MULTILINE)
         self.act_field_checkbox = tool("Checkbox", None, Tool.FIELD_CHECKBOX)
         self.act_field_combo = tool("Dropdown", None, Tool.FIELD_COMBO)
+        # Signing (Sign button). These two are tools, but each checks first:
+        # the picture tool needs a picture, both need permission to annotate.
+        self.act_sign_cert = QAction("Sign with Certificate…", self, checkable=True,
+                                     triggered=lambda: self.start_certificate_signing())
+        self.act_sign_picture = QAction("Place My Signature Picture", self, checkable=True,
+                                        triggered=lambda: self.place_signature_picture())
+        self.act_choose_picture = QAction("Choose Signature Picture…", self,
+                                          triggered=lambda: self.choose_signature_picture())
+        self.act_create_id = QAction("Create a Digital ID…", self,
+                                     triggered=lambda: self.create_digital_id())
+        self.act_signatures = QAction("Signatures in This Document…", self,
+                                      triggered=lambda: self.show_signatures())
         self.tool_actions = {
             Tool.SELECT: self.act_tool_select, Tool.PAN: self.act_tool_pan,
             Tool.NOTE: self.act_tool_note,
@@ -278,6 +311,7 @@ class MainWindow(QMainWindow):
             Tool.STAMP: self.act_tool_stamp, Tool.FORM: self.act_tool_form,
             Tool.FIELD_TEXT: self.act_field_text, Tool.FIELD_MULTILINE: self.act_field_multiline,
             Tool.FIELD_CHECKBOX: self.act_field_checkbox, Tool.FIELD_COMBO: self.act_field_combo,
+            Tool.SIGN: self.act_sign_cert, Tool.SIGNATURE: self.act_sign_picture,
         }
         # Everything that marks up the page, grouped as the toolbar shows it.
         self.annotate_menu = QMenu("Annotate", self)
@@ -304,6 +338,16 @@ class MainWindow(QMainWindow):
         for act in (self.act_field_text, self.act_field_multiline, self.act_field_checkbox,
                     self.act_field_combo):
             self.form_menu.addAction(act)
+
+        self.sign_menu = QMenu("Sign", self)
+        self.sign_menu.addAction(self.act_sign_cert)
+        self.sign_menu.addAction(self.act_sign_picture)
+        self.sign_menu.addSeparator()
+        self.sign_menu.addAction(self.act_choose_picture)
+        self.sign_menu.addAction(self.act_create_id)
+        self.sign_menu.addSeparator()
+        self.sign_menu.addAction(self.act_signatures)
+        self.sign_tools = {Tool.SIGN, Tool.SIGNATURE}
         for act in self.tool_actions.values():
             self.tool_group.addAction(act)
 
@@ -436,6 +480,11 @@ class MainWindow(QMainWindow):
         self.form_button.setMenu(self.form_menu)
         self.form_button.setPopupMode(QToolButton.InstantPopup)
         tools.addWidget(self.form_button)
+        self.sign_button = QToolButton(self, text="Sign")
+        self.sign_button.setMenu(self.sign_menu)
+        self.sign_button.setPopupMode(QToolButton.InstantPopup)
+        tools.addWidget(self.sign_button)
+        self.view.signature_box.connect(self.sign_with_certificate)
         self.view.tool_changed.connect(self._on_tool_changed)
         self.view.editing_changed.connect(self._on_editing_changed)
         self.view.message.connect(lambda text: self.statusBar().showMessage(text, 8000))
@@ -476,6 +525,7 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(self.act_tool_pan)
         tools_menu.addMenu(self.annotate_menu)
         tools_menu.addMenu(self.form_menu)
+        tools_menu.addMenu(self.sign_menu)
         tools_menu.addSeparator()
         tools_menu.addAction(self.act_ocr)
         tools_menu.addSeparator()
@@ -799,7 +849,8 @@ class MainWindow(QMainWindow):
         self.view.access = a
         off = []
         if not a.annotate:
-            off += [self.tool_actions[t] for t in self.annotate_tools] + [self.act_delete_annot]
+            off += [self.tool_actions[t] for t in self.annotate_tools | self.sign_tools] \
+                + [self.act_delete_annot]
         if not a.modify:
             off += [self.tool_actions[t] for t in self.form_tools] + [self.act_ocr]
         if not a.assemble:
@@ -813,6 +864,8 @@ class MainWindow(QMainWindow):
             act.setEnabled(False)
         self.annotate_button.setEnabled(a.annotate)
         self.form_button.setEnabled(a.modify)
+        for act in (self.act_signatures,):  # needs a document, not permission
+            act.setEnabled(self.view.document is not None)
         restricted = a.restricted() if self.view.document is not None else []
         if restricted:
             listed = ", ".join(restricted[:-1]) + (" and " if len(restricted) > 1 else "") \
@@ -892,6 +945,155 @@ class MainWindow(QMainWindow):
         self.history.push(state, label)
         self._refresh_edit_state()
         self.statusBar().showMessage(f"{note} (Ctrl+Z undoes it.)", 10000)
+
+    # ---- signing -------------------------------------------------------
+
+    def _signature_picture(self, ask: bool):
+        """The user's signature picture: loaded once, from the remembered
+        file; asked for if there's none (and `ask`)."""
+        if self._picture is not None:
+            return self._picture
+        path = self.settings.signature_picture()
+        if path and Path(path).exists():
+            try:
+                self._picture = load_signature_image(path)
+                return self._picture
+            except SignatureImageError:
+                pass  # the file changed into something unusable: ask again
+        if not ask:
+            return None
+        chosen = choose_picture(self, path)
+        if chosen is None:
+            return None
+        path, self._picture = chosen
+        self.settings.set_signature_picture(path)
+        return self._picture
+
+    def choose_signature_picture(self) -> None:
+        chosen = choose_picture(self, self.settings.signature_picture())
+        if chosen is not None:
+            path, self._picture = chosen
+            self.settings.set_signature_picture(path)
+            self.view.signature_image = self._picture
+            self.statusBar().showMessage("Signature picture set.", 5000)
+
+    def place_signature_picture(self) -> None:
+        if self.view.document is None or not self._allowed(self.access.annotate,
+                                                            "adding signatures"):
+            self.view.set_tool(Tool.SELECT)
+            return
+        picture = self._signature_picture(ask=True)
+        if picture is None:
+            self.view.set_tool(Tool.SELECT)
+            self._on_tool_changed(self.view.tool)  # un-tick the menu item
+            return
+        self.view.signature_image = picture
+        self.view.set_tool(Tool.SIGNATURE)
+        self.statusBar().showMessage(
+            "Click where your signature goes, or drag a box to size it.", 8000)
+
+    def start_certificate_signing(self) -> None:
+        if self.view.document is None or not self._allowed(self.access.annotate,
+                                                            "adding signatures"):
+            self.view.set_tool(Tool.SELECT)
+            return
+        self.view.set_tool(Tool.SIGN)
+        self.statusBar().showMessage(
+            "Drag a box where the signature goes (or click for a standard size).", 8000)
+
+    def create_digital_id(self) -> None:
+        dialog = CreateIDDialog(self, getpass.getuser())
+        if dialog.exec() == QDialog.Accepted and dialog.created is not None:
+            self.settings.remember_digital_id_file(str(dialog.created.path))
+            self.statusBar().showMessage(f"Digital ID saved: {dialog.created.path}", 10000)
+
+    def sign_with_certificate(self, index: int, rect) -> None:
+        """Sign where the box was drawn. The signed file is the document's own
+        bytes plus a new revision -- so signatures already in it stay valid --
+        unless there are unsaved changes, which have to be written first."""
+        doc = self.view.document
+        if doc is None or self.history is None or not self._allowed(self.access.annotate,
+                                                                    "adding signatures"):
+            return
+        self.view.commit_text_edit()
+        self.view.commit_field_edit()
+        windows_ids = []
+        try:
+            from . import wincert
+            windows_ids = wincert.list_ids()
+        except Exception as exc:  # shown, not hidden: the .pfx route still works
+            self.statusBar().showMessage(f"Windows certificates couldn't be listed: {exc}", 10000)
+        dialog = SignDialog(self, self.settings, self._signature_picture(ask=False),
+                            windows_ids, int(self.winId()))
+        if dialog.exec() != QDialog.Accepted:
+            return
+        if dialog.picture_path:
+            self._picture = dialog.picture
+            self.settings.set_signature_picture(dialog.picture_path)
+        dest = self._ask_save_path("Save the Signed Document", doc.path)
+        if dest is None:
+            return
+        unchanged = self._unchanged()
+        if not unchanged and not self._confirm_breaking_signatures(dest):
+            return
+        written = None
+        if unchanged:
+            base, password = doc.path, doc.password
+        else:
+            written = self._write(doc.pages, dest, "Signing failed")
+            if written is None:
+                return
+            base, password = written[0], self._saved_password()
+        signed = dest.with_name(f".{dest.stem}.signed.tmp")
+        try:
+            pdfsign.sign(base, password, signed, index, rect, doc.page_rotation(index),
+                         dialog.look, dialog.signer)
+        except Exception as exc:
+            signed.unlink(missing_ok=True)
+            QMessageBox.critical(self, "Signing failed", f"The document wasn't signed:\n\n{exc}")
+            return
+        finally:
+            if written is not None:
+                written[0].unlink(missing_ok=True)
+        self._install(signed, dest, password, "Signed")
+
+    def _check_signatures(self, document: Optional[PdfDocument]) -> None:
+        """On opening: check the document's signatures and say what was found."""
+        self._signature_infos = []
+        self.act_signatures.setEnabled(document is not None)
+        if document is None or not document.signature_count():
+            self.signature_bar.hide()
+            return
+        try:
+            self._signature_infos = pdfsign.check(document.path, document.password)
+        except Exception as exc:  # rule 7: say so, don't hide it
+            self._show_signature_bar(pdfsign.BROKEN,
+                                     f"<b>The signatures couldn't be checked:</b> {exc}")
+            return
+        if self._signature_infos:
+            self._show_signature_bar(*signature_summary(self._signature_infos))
+        else:
+            self.signature_bar.hide()
+
+    def _show_signature_bar(self, level: str, text: str) -> None:
+        background, border = {pdfsign.OK: ("#e6f4ea", "#9fd3ae"),
+                              pdfsign.UNTRUSTED: ("#fff4ce", "#e0c870"),
+                              pdfsign.CHANGED: ("#ffe7cc", "#e8b070"),
+                              pdfsign.BROKEN: ("#fde7e9", "#e8a0a8")}[level]
+        # Explicit colours for the button too (dark mode; see the restriction bar).
+        self.signature_bar.setStyleSheet(
+            f"#signatures {{ background: {background}; border-bottom: 1px solid {border}; }}"
+            "QLabel { color: #202020; }"
+            "QPushButton { color: #1e1e1e; background: #ffffff; border: 1px solid #a0a0a8;"
+            " border-radius: 3px; padding: 3px 14px; }")
+        self.signature_text.setText(text)
+        self.signature_bar.show()
+
+    def show_signatures(self) -> None:
+        if not self._signature_infos:
+            QMessageBox.information(self, "Signatures", "This document has no digital signatures.")
+            return
+        SignaturesDialog(self, self._signature_infos).exec()
 
     # ---- page edits (continued) ----------------------------------------
 
@@ -1058,6 +1260,8 @@ class MainWindow(QMainWindow):
         self.annotate_button.setText(f"Annotate: {name}" if tool in self.annotate_tools
                                      else "Annotate")
         self.form_button.setText(f"Form: {name}" if tool in self.form_tools else "Form")
+        self.sign_button.setText({Tool.SIGN: "Sign: Certificate",
+                                  Tool.SIGNATURE: "Sign: Picture"}.get(tool, "Sign"))
 
     @staticmethod
     def _swatch(color) -> QIcon:
@@ -1419,15 +1623,59 @@ class MainWindow(QMainWindow):
         )
         return answer == QMessageBox.Save
 
+    def _saved_password(self) -> Optional[str]:
+        """The password the file being saved will open with."""
+        protection = self.history.current.protection
+        return (self.view.document.password if protection is KEEP
+                else None if protection == REMOVE else protection)
+
+    def _unchanged(self) -> bool:
+        """Nothing to write: the document is exactly the file on disk."""
+        return self.history is not None and not self.history.dirty
+
+    def _confirm_breaking_signatures(self, dest: Path) -> bool:
+        """Saving rewrites the whole file (qpdf), and a digital signature
+        covers exact bytes: every one in the file breaks. Say so first."""
+        count = self.view.document.signature_count()
+        if not count:
+            return True
+        what = "a digital signature" if count == 1 else f"{count} digital signatures"
+        answer = QMessageBox.warning(
+            self, "This document is signed",
+            f"This document carries {what}. Saving your changes rewrites the file, so "
+            f"in {dest.name} the signature{'s' if count > 1 else ''} will show as broken "
+            f"in every PDF reader.\n\nTo keep a valid signed copy, Cancel and use Save As "
+            f"under a new name for your changes, leaving the signed file as it is.",
+            QMessageBox.Save | QMessageBox.Cancel, QMessageBox.Cancel)
+        return answer == QMessageBox.Save
+
     def _save_to(self, dest: Path) -> bool:
         """Write, swap in, reopen."""
         doc = self.view.document
-        edits = DocState(doc.pages, doc.annots, doc.fields, doc.forms, doc.ocr)
-        written = self._write(edits.pages, dest, "Save failed")
+        if self._unchanged() and doc.signature_count() and not self._same_file(dest, doc.path):
+            # Save As of an untouched signed file: copy its bytes, so the copy's
+            # signatures stay valid (rewriting would break them for nothing).
+            tmp = dest.with_name(f".{dest.stem}.copy.tmp")
+            try:
+                shutil.copyfile(doc.path, tmp)
+            except OSError as exc:
+                QMessageBox.critical(self, "Save failed", f"Could not write {dest.name}:\n\n{exc}")
+                return False
+            return self._install(tmp, dest, doc.password, "Saved")
+        if not self._confirm_breaking_signatures(dest):
+            return False
+        written = self._write(doc.pages, dest, "Save failed")
         if written is None:
             return False
-        tmp, allowed = written
+        tmp, _ = written
+        return self._install(tmp, dest, self._saved_password(), "Saved")
 
+    def _install(self, tmp: Path, dest: Path, password: Optional[str], verb: str) -> bool:
+        """Swap a finished temp file into place and reopen it as the document.
+        The saved file is the new baseline, edits baked in; the undo history
+        refers to the old files' page numbers, so it starts over."""
+        doc = self.view.document
+        edits = DocState(doc.pages, doc.annots, doc.fields, doc.forms, doc.ocr)
         # pdfium holds every source open and Windows won't replace an open
         # file, so release them -- but only when one of them is the target.
         sources = doc.sources
@@ -1439,24 +1687,19 @@ class MainWindow(QMainWindow):
         except SaveError as exc:
             if overwriting:
                 self._reopen(sources, keep_edits=edits)
-            QMessageBox.critical(self, "Save failed", f"{exc}\n\nThe original file is unchanged.")
+            QMessageBox.critical(self, f"{verb} failed",
+                                 f"{exc}\n\nThe original file is unchanged.")
             return False
-
-        # The saved file is the new baseline, with the edits baked in. The undo
-        # history refers to the old files' page numbers, so it starts over.
-        protection = self.history.current.protection
-        password = (doc.password if protection is KEEP
-                    else None if protection == REMOVE else protection)
         try:
             self._reopen([SourceInfo(dest, password)])
         except Exception as exc:
             self.view.set_document(None)
             QMessageBox.critical(
-                self, "Saved, but could not reopen",
-                f"{dest.name} was saved, but reopening it failed:\n\n{exc}",
+                self, f"{verb}, but could not reopen",
+                f"{dest.name} was written, but reopening it failed:\n\n{exc}",
             )
             return True
-        self.statusBar().showMessage(f"Saved {dest}", 5000)
+        self.statusBar().showMessage(f"{verb} {dest}", 5000)
         return True
 
     def _reopen(self, sources: list[SourceInfo],
@@ -1493,6 +1736,7 @@ class MainWindow(QMainWindow):
             self.status_left.setText("No document")
             self.status_right.setText("")
             self._set_document_actions_enabled(False)
+            self._check_signatures(None)
             return
 
         if not self._keep_history:
@@ -1506,6 +1750,7 @@ class MainWindow(QMainWindow):
                      "(same as Chrome/Edge) -- open it in Acrobat")
         self.status_left.setText(f"{document.path}{forms}")
         self._set_document_actions_enabled(True)
+        self._check_signatures(document)
         if not any(document.has_text(i) for i in range(min(3, document.page_count))):
             self.statusBar().showMessage(
                 "This PDF looks scanned (its pages are pictures, with no text). "
