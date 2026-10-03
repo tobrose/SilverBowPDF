@@ -5,31 +5,29 @@ are cheap when they aren't painted, and Qt only calls paintEvent on what's
 visible, so laziness comes for free. This falls over somewhere north of a few
 thousand pages, at which point the answer is a single custom-painted canvas
 with virtualised page slots -- not worth the complexity yet.
+
+PdfView is assembled from mixins, one per kind of work on the page, all
+sharing its state: viewdraw (shapes, ink, stamps, signature boxes),
+viewtext (text boxes, resizing), viewforms (filling and preparing forms).
+This file keeps the view itself -- layout, zoom, navigation, selection,
+mouse routing and the chrome painted over pages. Tools are in tools.py;
+the small floating widgets in viewbars.py.
 """
 
 from __future__ import annotations
 
 import getpass
-import math
-import time
 from dataclasses import replace
-from enum import Enum
 from typing import List, Optional
 
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, Signal
-from PySide6.QtGui import (QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap,
-                           QTextCursor, QWheelEvent)
+from PySide6.QtGui import QColor, QPainter, QPen, QWheelEvent
 from PySide6.QtWidgets import (
     QApplication,
-    QButtonGroup,
     QFrame,
-    QHBoxLayout,
     QLabel,
-    QMenu,
-    QPlainTextEdit,
     QScrollArea,
     QSizePolicy,
-    QToolButton,
     QToolTip,
     QVBoxLayout,
     QWidget,
@@ -40,41 +38,33 @@ from .annots import (
     SHAPE_COLORS,
     STAMPS,
     TEXT_COLORS,
-    TEXT_SIZES,
     Annot,
     describe,
     describe_annot,
     lay_markup,
-    new_ink,
-    new_line,
     new_markup,
-    new_shape,
-    new_stamp,
-    new_signature_image,
-    new_text,
-    signature_click_box,
-    text_box_size,
     without,
 )
-from .fields import (
-    CHECKBOX,
-    COMBO,
-    NEW_FIELD_SIZES,
-    RADIO,
-    SIGNATURE,
-    TEXT,
-    Widget,
-    auto_font_size,
-    current_value,
-    is_on,
-    new_field,
-    unique_name,
-)
-from .textlayout import PADDING, encodable, layout
+from .fields import TEXT
 from .document import PdfDocument
 from .rendering import PageRenderer
 from .security import FULL_ACCESS
 from .transform import PageTransform, normalize_rotation
+from .tools import (
+    FitMode,
+    Tool,
+    MARKUP_TOOLS,
+    TEXT_TOOLS,
+    DRAW_TOOLS,
+    FIELD_TOOLS,
+    FORM_TOOLS,
+    SIGN_TOOLS,
+    EDGE_CURSORS,
+)
+from .viewbars import MarkBar
+from .viewdraw import DrawingMixin
+from .viewforms import FormsMixin
+from .viewtext import TextBoxMixin
 
 PAGE_GAP = 14          # logical px between pages
 VIEW_MARGIN = 18       # logical px around the page column
@@ -82,236 +72,6 @@ MIN_SCALE = 0.08
 MAX_SCALE = 12.0
 ZOOM_STEPS = [0.10, 0.25, 0.33, 0.50, 0.67, 0.75, 1.00, 1.25, 1.50,
               2.00, 3.00, 4.00, 6.00, 8.00]
-
-
-class FitMode(Enum):
-    FIXED = "fixed"
-    WIDTH = "width"
-    PAGE = "page"
-
-
-class Tool(Enum):
-    SELECT = "select"
-    PAN = "pan"                 # drag to scroll; sticky until Esc
-    NOTE = "note"
-    HIGHLIGHT = "highlight"
-    UNDERLINE = "underline"
-    STRIKEOUT = "strikeout"
-    TYPEWRITER = "typewriter"
-    RECT = "rect"
-    ELLIPSE = "ellipse"
-    LINE = "line"
-    ARROW = "arrow"
-    PEN = "pen"
-    STAMP = "stamp"
-    FORM = "form"               # edit fields: select, move, resize, delete, properties
-    FIELD_TEXT = "field_text"
-    FIELD_MULTILINE = "field_multiline"
-    FIELD_CHECKBOX = "field_checkbox"
-    FIELD_COMBO = "field_combo"
-    SIGN = "sign"               # certificate signature: drag its box, then MainWindow signs
-    SIGNATURE = "signature"     # picture signature: an image stamp, no certificate
-
-
-# Tools that mark text: drag across it, a markup annotation lands on release.
-MARKUP_TOOLS = {Tool.HIGHLIGHT: "Highlight", Tool.UNDERLINE: "Underline",
-                Tool.STRIKEOUT: "StrikeOut"}
-# Typewriter only: the separate Text Box tool was removed (user's call).
-# Bordered boxes from files, or made before, still open and resize.
-TEXT_TOOLS = (Tool.TYPEWRITER,)
-# Drag to draw. Shapes return to Select once drawn; the pen stays until Esc.
-DRAW_TOOLS = (Tool.RECT, Tool.ELLIPSE, Tool.LINE, Tool.ARROW, Tool.PEN)
-RESIZABLE_SHAPES = ("Square", "Circle")
-# Draw a field (drag, or click for a standard size); then Edit Fields.
-FIELD_TOOLS = {Tool.FIELD_TEXT: (TEXT, False), Tool.FIELD_MULTILINE: (TEXT, True),
-               Tool.FIELD_CHECKBOX: (CHECKBOX, False), Tool.FIELD_COMBO: (COMBO, False)}
-FORM_TOOLS = (Tool.FORM, *FIELD_TOOLS)
-# Drag a box (or click for a standard size); both return to Select after.
-SIGN_TOOLS = (Tool.SIGN, Tool.SIGNATURE)
-SIGN_BOX = (216.0, 72.0)  # points, as read: a certificate signature placed with a click
-
-_EDGE_CURSORS = {
-    "l": Qt.SizeHorCursor, "r": Qt.SizeHorCursor, "t": Qt.SizeVerCursor, "b": Qt.SizeVerCursor,
-    "lt": Qt.SizeFDiagCursor, "rb": Qt.SizeFDiagCursor, "rt": Qt.SizeBDiagCursor,
-    "lb": Qt.SizeBDiagCursor,
-}
-
-
-class _FieldEditor(QPlainTextEdit):
-    """In-place editor for a form text field. Enter finishes a one-line
-    field; Tab / Shift+Tab finish and move to the next / previous field."""
-
-    finished = Signal(int)  # 0 done, +1 next field, -1 previous field
-
-    def __init__(self, parent, multiline: bool):
-        super().__init__(parent)
-        self.setFrameShape(QFrame.NoFrame)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setLineWrapMode(QPlainTextEdit.WidgetWidth if multiline else QPlainTextEdit.NoWrap)
-        self._multiline = multiline
-        self._done = False
-
-    def keyPressEvent(self, event) -> None:
-        key = event.key()
-        if key == Qt.Key_Backtab or (key == Qt.Key_Tab and event.modifiers() & Qt.ShiftModifier):
-            self.finish(-1)
-        elif key == Qt.Key_Tab:
-            self.finish(+1)
-        elif key == Qt.Key_Escape:
-            self.finish(0)
-        elif key in (Qt.Key_Return, Qt.Key_Enter) and (
-                not self._multiline or event.modifiers() & Qt.ControlModifier):
-            self.finish(0)
-        else:
-            super().keyPressEvent(event)
-
-    def focusNextPrevChild(self, forward: bool) -> bool:
-        return False  # Tab is ours, not Qt's focus chain
-
-    def focusOutEvent(self, event) -> None:
-        super().focusOutEvent(event)
-        self.finish(0)
-
-    def finish(self, move: int) -> None:
-        if not self._done:
-            self._done = True
-            self.finished.emit(move)
-
-    def reopen(self) -> None:
-        self._done = False
-        self.setFocus()
-
-
-class _TextEditor(QPlainTextEdit):
-    """The in-place editor for a text box. Finishes on Esc, Ctrl+Enter or
-    losing focus -- clicking anywhere else is how you're done typing."""
-
-    finished = Signal()
-
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.setFrameShape(QFrame.NoFrame)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setTabChangesFocus(True)
-        self._done = False
-
-    def keyPressEvent(self, event) -> None:
-        if event.key() == Qt.Key_Escape or (
-                event.key() in (Qt.Key_Return, Qt.Key_Enter)
-                and event.modifiers() & Qt.ControlModifier):
-            self.finish()
-            return
-        super().keyPressEvent(event)
-
-    def focusOutEvent(self, event) -> None:
-        super().focusOutEvent(event)
-        self.finish()
-
-    def finish(self) -> None:
-        if not self._done:
-            self._done = True
-            self.finished.emit()
-
-    def reopen(self) -> None:
-        self._done = False
-        self.setFocus()
-
-
-def _swatch_icon(color, size: int = 12) -> QIcon:
-    pixmap = QPixmap(size, size)
-    pixmap.fill(QColor.fromRgbF(*color))
-    return QIcon(pixmap)
-
-
-class _Bar(QFrame):
-    """A small row of buttons floating by the text: the mark bar under a
-    selection, the style bar over the typewriter. A child of the scrolling
-    page column, not a popup window -- it scrolls with the page, can't grab
-    the next click, and costs a remote desktop one small repaint -- and not of the page
-    itself, which would clip it when zoomed out narrower than the bar. Its
-    buttons never take focus, so keys stay with the view, and a text editor
-    being typed in keeps its caret."""
-
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.setObjectName("bar")
-        # Explicit colours throughout: the viewport's dark stylesheet
-        # cascades to every child otherwise.
-        self.setStyleSheet(
-            "#bar { background: #ffffff; border: 1px solid #9a9aa2; border-radius: 4px; }"
-            "QToolButton { background: transparent; color: #1e1e1e; border: 1px solid transparent;"
-            " border-radius: 3px; padding: 3px 6px; }"
-            "QToolButton:hover { background: #e3ecfb; }"
-            "QToolButton:pressed { background: #c9dbf7; }"
-            "QToolButton:checked { border-color: #2868e6; background: #e3ecfb; }"
-            "QLabel { color: #5a5a60; background: transparent; padding: 0 2px 0 4px; }")
-        self._row = QHBoxLayout(self)
-        self._row.setContentsMargins(3, 2, 3, 2)
-        self._row.setSpacing(1)
-
-    def button(self, text: str = "", icon: Optional[QIcon] = None, tip: str = "",
-               checked: Optional[bool] = None) -> QToolButton:
-        b = QToolButton(self, text=text, autoRaise=True, focusPolicy=Qt.NoFocus, toolTip=tip)
-        if icon is not None:
-            b.setIcon(icon)
-            b.setToolButtonStyle(Qt.ToolButtonTextBesideIcon if text else Qt.ToolButtonIconOnly)
-        if checked is not None:
-            b.setCheckable(True)
-            b.setChecked(checked)
-        b.setCursor(Qt.PointingHandCursor)
-        self._row.addWidget(b)
-        return b
-
-    def label(self, text: str) -> None:
-        self._row.addWidget(QLabel(text, self))
-
-    def gap(self) -> None:
-        self._row.addSpacing(8)
-
-
-class _MarkBar(_Bar):
-    """Under a fresh text selection (Select tool): Highlight in the current
-    colour or one of the others, Underline, Strikethrough."""
-
-    chosen = Signal(str, object)  # kind, highlight colour (None: current / not a highlight)
-
-    def __init__(self, parent, highlight_color):
-        super().__init__(parent)
-        self.button("Highlight", _swatch_icon(highlight_color),
-                    "Highlight in the current colour").clicked.connect(
-            lambda: self.chosen.emit("Highlight", None))
-        for name, color in HIGHLIGHT_COLORS.items():
-            self.button(icon=_swatch_icon(color), tip=f"Highlight {name.lower()}").clicked.connect(
-                lambda _=False, c=color: self.chosen.emit("Highlight", c))
-        self.gap()
-        self.button("Underline").clicked.connect(lambda: self.chosen.emit("Underline", None))
-        self.button("Strikethrough").clicked.connect(lambda: self.chosen.emit("StrikeOut", None))
-        self.adjustSize()
-
-
-class _StyleBar(_Bar):
-    """Over the typewriter while typing: text colour and size. Changing
-    them restyles what's being typed, and becomes the default for the next."""
-
-    chosen = Signal(object, object)  # size or None, colour or None
-
-    def __init__(self, parent, size: float, color):
-        super().__init__(parent)
-        colors, sizes = QButtonGroup(self), QButtonGroup(self)  # one ticked in each
-        self.label("Colour")
-        for name, c in TEXT_COLORS.items():
-            b = self.button(icon=_swatch_icon(c, 14), tip=name, checked=tuple(c) == tuple(color))
-            colors.addButton(b)
-            b.clicked.connect(lambda _=False, c=c: self.chosen.emit(None, c))
-        self.gap()
-        self.label("Size")
-        for s in TEXT_SIZES:
-            b = self.button(str(s), tip=f"{s} pt", checked=abs(s - size) < 0.01)
-            sizes.addButton(b)
-            b.clicked.connect(lambda _=False, s=s: self.chosen.emit(float(s), None))
-        self.adjustSize()
 
 
 class PageWidget(QWidget):
@@ -412,7 +172,7 @@ class PageWidget(QWidget):
         painter.drawRect(rect.adjusted(0, 0, -1, -1))
 
 
-class PdfView(QScrollArea):
+class PdfView(FormsMixin, TextBoxMixin, DrawingMixin, QScrollArea):
     """Continuous vertical scroll view over a document."""
 
     page_changed = Signal(int)        # 0-based
@@ -456,7 +216,7 @@ class PdfView(QScrollArea):
         self._search_hits = {}  # page index -> [(start, end, rects)], see set_search_hits
         self._search_current = None  # (page index, start) of the current match
         self._pan = None        # (last global pos, mouse button) while panning
-        self._mark_bar = None   # _MarkBar under a fresh text selection, see _show_mark_bar
+        self._mark_bar = None   # MarkBar under a fresh text selection, see _show_mark_bar
         # What the document's author allows (security.py). MainWindow sets
         # it and gates every edit; this keeps the page from offering (a drag,
         # the mark bar, a field to type in) what would then be refused.
@@ -603,7 +363,7 @@ class PdfView(QScrollArea):
                  for r in self.document.text_rects(index, start, end)]
         if not rects:
             return
-        bar = _MarkBar(self._container, self.highlight_color)
+        bar = MarkBar(self._container, self.highlight_color)
         bar.chosen.connect(self._mark_from_bar)
         gap = 6
         x = rects[-1].center().x() - bar.width() / 2
@@ -912,14 +672,14 @@ class PdfView(QScrollArea):
                 page.setCursor(Qt.ForbiddenCursor)
                 return
             edges = self._edges_of(page, widget, pos) if widget is not None else ""
-            page.setCursor(_EDGE_CURSORS[edges] if edges else
+            page.setCursor(EDGE_CURSORS[edges] if edges else
                            Qt.SizeAllCursor if widget is not None else Qt.ArrowCursor)
             return
         if self._tool is not Tool.SELECT:
             return
         edge = self._resize_hit(page, pos) if self.access.annotate else None
         if edge is not None:
-            page.setCursor(_EDGE_CURSORS[edge[1]])
+            page.setCursor(EDGE_CURSORS[edge[1]])
             QToolTip.hideText()
             return
         annot = self._annot_at(page, pos)
@@ -1023,627 +783,10 @@ class PdfView(QScrollArea):
             return True
         return False
 
-    # -- drawing shapes, lines, ink; placing stamps
-
-    def _drawn_points(self, page: "PageWidget", drag):
-        """(start, end) in widget px, Shift-constrained: equal sides for
-        rectangles and ellipses, 45-degree steps for lines and arrows."""
-        a, b = drag["press"], drag["end"]
-        ax, ay, bx, by = a.x(), a.y(), b.x(), b.y()
-        if drag["shift"]:
-            dx, dy = bx - ax, by - ay
-            if self._tool in (Tool.RECT, Tool.ELLIPSE):
-                side = max(abs(dx), abs(dy))
-                bx, by = ax + math.copysign(side, dx or 1), ay + math.copysign(side, dy or 1)
-            elif self._tool in (Tool.LINE, Tool.ARROW):
-                length = math.hypot(dx, dy)
-                angle = round(math.atan2(dy, dx) / (math.pi / 4)) * (math.pi / 4)
-                bx, by = ax + length * math.cos(angle), ay + length * math.sin(angle)
-        return (ax, ay), (bx, by)
-
-    def _finish_drawing(self, page: "PageWidget", drag) -> None:
-        doc = self.document
-        t = page.widget_transform()
-        (ax, ay), (bx, by) = self._drawn_points(page, drag)
-        color, width = self.shape_color, self.shape_width
-        if self._tool is Tool.PEN:
-            flat = tuple(v for pt in drag["points"] for v in pt)
-            if len(flat) == 2:
-                flat = flat * 2  # a dot
-            annot = new_ink(flat, self.author, color, width)
-            label = "Add Drawing"
-        elif math.hypot(bx - ax, by - ay) < 3:
-            return  # a click, not a drag
-        elif self._tool in (Tool.RECT, Tool.ELLIPSE):
-            rect = t.widget_rect_to_pdf((min(ax, bx), min(ay, by), max(ax, bx), max(ay, by)))
-            kind = "Square" if self._tool is Tool.RECT else "Circle"
-            annot = new_shape(kind, rect, self.author, color, width)
-            label = "Add Rectangle" if kind == "Square" else "Add Ellipse"
-        else:
-            x1, y1 = t.widget_to_pdf(ax, ay)
-            x2, y2 = t.widget_to_pdf(bx, by)
-            arrow = self._tool is Tool.ARROW
-            annot = new_line(x1, y1, x2, y2, self.author, color, width, arrow)
-            label = "Add Arrow" if arrow else "Add Line"
-        self.annots_edit.emit(doc.page_key(page.index), doc.page_annots(page.index) + (annot,),
-                              label)
-        if self._tool is not Tool.PEN:
-            # One shape per pick (user's preference), selected so it can be
-            # nudged or resized straight away. The pen stays: handwriting and
-            # signatures take many strokes.
-            self.select_annot(page.index, annot.ident)
-            self.set_tool(Tool.SELECT)
-
-    def _paint_drawing(self, page: "PageWidget", painter: QPainter, drag) -> None:
-        """Preview while dragging -- chrome; pdfium draws the real thing."""
-        scale = page.widget_transform().scale
-        r, g, b = (round(c * 255) for c in self.shape_color)
-        pen = QPen(QColor(r, g, b, 200), max(1.0, self.shape_width * scale))
-        pen.setCapStyle(Qt.RoundCap)
-        pen.setJoinStyle(Qt.RoundJoin)
-        painter.setPen(pen)
-        painter.setBrush(Qt.NoBrush)
-        if self._tool is Tool.PEN:
-            path = QPainterPath()
-            for i, pt in enumerate(drag["points"]):
-                x, y = page.widget_transform().pdf_to_widget(*pt)
-                path.moveTo(x, y) if i == 0 else path.lineTo(x, y)
-            painter.drawPath(path)
-            return
-        (ax, ay), (bx, by) = self._drawn_points(page, drag)
-        if self._tool is Tool.RECT:
-            painter.drawRect(QRectF(min(ax, bx), min(ay, by), abs(bx - ax), abs(by - ay)))
-        elif self._tool is Tool.ELLIPSE:
-            painter.drawEllipse(QRectF(min(ax, bx), min(ay, by), abs(bx - ax), abs(by - ay)))
-        else:
-            painter.drawLine(QPointF(ax, ay), QPointF(bx, by))
-
-    def _place_stamp(self, page: "PageWidget", pos: QPoint) -> None:
-        label, color, dated, name = self.stamp
-        sublabel = f"{self.author}, {time.strftime('%Y-%m-%d %H:%M')}" if dated else ""
-        x, y = page.pdf_point_at(pos)
-        doc = self.document
-        stamp = new_stamp(label, sublabel, x, y, self.author, color,
-                          doc.page_rotation(page.index), name)
-        self.annots_edit.emit(doc.page_key(page.index), doc.page_annots(page.index) + (stamp,),
-                              "Add Stamp")
-        self.select_annot(page.index, stamp.ident)
-        self.set_tool(Tool.SELECT)  # like a note: one stamp per pick
-
-    # -- signatures: drag a box, or click for a standard size
-
-    def _finish_sign_box(self, page: "PageWidget", drag) -> None:
-        doc = self.document
-        rotation = doc.page_rotation(page.index)
-        a, b = drag["press"], drag["end"]
-        tool = self._tool
-        if b is not None and abs(b.x() - a.x()) >= 8 and abs(b.y() - a.y()) >= 8:
-            rect = page.widget_transform().widget_rect_to_pdf(
-                (min(a.x(), b.x()), min(a.y(), b.y()), max(a.x(), b.x()), max(a.y(), b.y())))
-        else:
-            x, y = page.pdf_point_at(a)
-            if tool is Tool.SIGNATURE:
-                rect = signature_click_box(self.signature_image, x, y, rotation)
-            else:
-                w, h = SIGN_BOX if rotation % 180 == 0 else SIGN_BOX[::-1]
-                rect = (x - w / 2, y - h / 2, x + w / 2, y + h / 2)
-        self.set_tool(Tool.SELECT)  # one signature per pick, like a stamp
-        if tool is Tool.SIGNATURE:
-            signature = new_signature_image(self.signature_image, rect, self.author, rotation)
-            self.annots_edit.emit(doc.page_key(page.index),
-                                  doc.page_annots(page.index) + (signature,), "Add Signature")
-            self.select_annot(page.index, signature.ident)
-        else:
-            self.signature_box.emit(page.index, rect)
-
-    # -- resizing text boxes and shapes (widget space; see _resize_hit)
-
-    def _resize_hit(self, page: "PageWidget", pos: QPoint):
-        """(annot, edges) if `pos` is on a resizable edge, else None.
-
-        Only text boxes that read upright on screen: with the view or the
-        page turned since typing, "drag the right edge wider" would change
-        the text's height instead, which is just confusing.
-        """
-        if self.document is None:
-            return None
-        grip = 5  # screen px either side of an edge
-        x, y = pos.x(), pos.y()
-        page_rotation = self.document.page_rotation(page.index)
-        for annot in reversed(self.document.page_annots(page.index)):
-            upright_text = annot.kind == "FreeText" and self._rotation == 0 \
-                and annot.text_rotation == page_rotation
-            if not upright_text and annot.kind not in RESIZABLE_SHAPES:
-                continue
-            left, top, right, bottom = page.widget_transform().pdf_rect_to_widget(annot.rect)
-            if not (left - grip <= x <= right + grip and top - grip <= y <= bottom + grip):
-                continue
-            edges = ""
-            if abs(x - left) <= grip:
-                edges += "l"
-            elif abs(x - right) <= grip:
-                edges += "r"
-            if abs(y - top) <= grip:
-                edges += "t"
-            elif abs(y - bottom) <= grip:
-                edges += "b"
-            if edges:
-                return annot, edges
-        return None
-
-    def _resized_rect(self, page: "PageWidget", drag, pos: QPoint):
-        """The dragged box in widget px, never narrower than a character or
-        shorter than its text needs at that width -- text is never cut off."""
-        annot, edges = drag["annot"], drag["edges"]
-        left, top, right, bottom = drag["start"]
-        dx, dy = pos.x() - drag["press"].x(), pos.y() - drag["press"].y()
-        if "l" in edges:
-            left += dx
-        if "r" in edges:
-            right += dx
-        if "t" in edges:
-            top += dy
-        if "b" in edges:
-            bottom += dy
-        scale = page.widget_transform().scale
-        if annot.kind != "FreeText":
-            # Shapes: anything but degenerate. Edges may cross; normalise.
-            min_side = 4.0
-            if right - left < min_side:
-                if "l" in edges:
-                    left = right - min_side
-                else:
-                    right = left + min_side
-            if bottom - top < min_side:
-                if "t" in edges:
-                    top = bottom - min_side
-                else:
-                    bottom = top + min_side
-            return left, top, right, bottom
-        min_width = (annot.font_size + 2 * PADDING) * scale
-        if right - left < min_width:
-            if "l" in edges:
-                left = right - min_width
-            else:
-                right = left + min_width
-        needed = layout(annot.contents, annot.font_size, (right - left) / scale).height * scale
-        if bottom - top < needed:
-            if "t" in edges:
-                top = bottom - needed
-            else:
-                bottom = top + needed
-        return left, top, right, bottom
-
-    # -- text boxes: typed in place, committed as a FreeText annotation
+    # -- in-place editors: text boxes (viewtext.py), form fields (viewforms.py)
 
     def is_editing(self) -> bool:
         return self._editor is not None or self._field_editor is not None
-
-    # -- form fields: filled in place, committed as FieldEdits
-
-    def _widget_at(self, page: "PageWidget", pos: QPoint, fillable_only: bool = True):
-        doc = self.document
-        if doc is None:
-            return None
-        x, y = page.pdf_point_at(pos)
-        for widget in reversed(doc.current_widgets(page.index)):
-            if widget.contains(x, y) and widget.kind in (TEXT, CHECKBOX, RADIO, COMBO):
-                if widget.fillable or not fillable_only:
-                    return widget
-        return None
-
-    # -- preparing a form: fields drawn, moved, resized, deleted
-
-    def _field_at(self, page: "PageWidget", pos: QPoint) -> Optional[Widget]:
-        x, y = page.pdf_point_at(pos)
-        grip = 3.0 / max(page.widget_transform().scale, 1e-6)
-        for widget in reversed(self.document.current_widgets(page.index)):
-            x0, y0, x1, y1 = widget.rect
-            if x0 - grip <= x <= x1 + grip and y0 - grip <= y <= y1 + grip:
-                return widget
-        return None
-
-    def selected_field(self):
-        """(page index, Widget) of the field selected in Edit Fields, or None."""
-        if self._selected_field is None or self.document is None:
-            return None
-        key, ident = self._selected_field
-        for page in self._pages:
-            if self.document.page_key(page.index) == key:
-                for widget in self.document.current_widgets(page.index):
-                    if widget.ident == ident:
-                        return page.index, widget
-        return None
-
-    def select_field(self, index: int, ident) -> None:
-        self._selected_field = (self.document.page_key(index), ident) if ident is not None else None
-        for page in self._pages:
-            page.update()
-
-    def _edges_of(self, page: "PageWidget", widget: Widget, pos: QPoint) -> str:
-        grip = 5
-        left, top, right, bottom = page.widget_transform().pdf_rect_to_widget(widget.rect)
-        x, y = pos.x(), pos.y()
-        if not (left - grip <= x <= right + grip and top - grip <= y <= bottom + grip):
-            return ""
-        edges = ""
-        if abs(x - left) <= grip:
-            edges += "l"
-        elif abs(x - right) <= grip:
-            edges += "r"
-        if abs(y - top) <= grip:
-            edges += "t"
-        elif abs(y - bottom) <= grip:
-            edges += "b"
-        return edges
-
-    def _locked(self, widget: Widget) -> bool:
-        """A signed signature field: its signature covers where it is, so
-        moving, resizing or deleting it breaks the signature (Acrobat
-        locks them too). Saving would warn -- this doesn't let it start."""
-        return widget.kind == SIGNATURE and (widget.signed or widget.name in self.signed_fields)
-
-    def _form_press(self, page: "PageWidget", pos: QPoint) -> bool:
-        widget = self._field_at(page, pos)
-        if widget is not None and self._locked(widget):
-            self.select_field(page.index, None)
-            self.message.emit("This signature field is signed: moving, resizing or deleting it "
-                              "would break the signature.")
-            return True
-        if widget is None:
-            # Clicking away from the fields means done preparing the form
-            # (user's rule, as for text boxes and shapes): back to Select.
-            self.select_field(page.index, None)
-            self.set_tool(Tool.SELECT)
-            return True
-        self.select_field(page.index, widget.ident)
-        edges = self._edges_of(page, widget, pos)
-        start = page.widget_transform().pdf_rect_to_widget(widget.rect)
-        self._drag = {"mode": "fresize" if edges else "fmove", "page": page, "widget": widget,
-                      "edges": edges, "press": pos, "start": start, "end": None}
-        return True
-
-    def _dragged_field_rect(self, page: "PageWidget", drag):
-        """The field's new rect in widget px while moving / resizing."""
-        left, top, right, bottom = drag["start"]
-        dx = drag["end"].x() - drag["press"].x()
-        dy = drag["end"].y() - drag["press"].y()
-        if drag["mode"] == "fmove":
-            return left + dx, top + dy, right + dx, bottom + dy
-        edges = drag["edges"]
-        if "l" in edges:
-            left = min(left + dx, right - 6)
-        if "r" in edges:
-            right = max(right + dx, left + 6)
-        if "t" in edges:
-            top = min(top + dy, bottom - 6)
-        if "b" in edges:
-            bottom = max(bottom + dy, top + 6)
-        return left, top, right, bottom
-
-    def _commit_field_geometry(self, page: "PageWidget", drag) -> None:
-        doc = self.document
-        rect = page.widget_transform().widget_rect_to_pdf(self._dragged_field_rect(page, drag))
-        old = drag["widget"]
-        widgets = tuple(w.moved_to(rect) if w.ident == old.ident else w
-                        for w in doc.current_widgets(page.index))
-        verb = "Move" if drag["mode"] == "fmove" else "Resize"
-        self.forms_edit.emit(doc.page_key(page.index), widgets, f"{verb} {old.short_name()}")
-
-    def taken_field_names(self, file: int) -> set:
-        doc = self.document
-        return {w.name for i in range(doc.page_count) if doc.pages[i].file == file
-                for w in doc.current_widgets(i)}
-
-    def _create_field(self, page: "PageWidget", drag) -> None:
-        doc = self.document
-        kind, multiline = FIELD_TOOLS[self._tool]
-        t = page.widget_transform()
-        a, b = drag["press"], drag["end"]
-        if b is not None and abs(b.x() - a.x()) >= 6 and abs(b.y() - a.y()) >= 6:
-            rect = t.widget_rect_to_pdf((min(a.x(), b.x()), min(a.y(), b.y()),
-                                         max(a.x(), b.x()), max(a.y(), b.y())))
-        else:
-            # A click: standard size, top-left at the click.
-            w, h = NEW_FIELD_SIZES[kind]
-            if multiline:
-                h = 60.0
-            x, y = page.pdf_point_at(a)
-            rect = (x, y - h, x + w, y)
-        name = unique_name(kind, self.taken_field_names(doc.pages[page.index].file))
-        options = ("Option 1", "Option 2", "Option 3") if kind == COMBO else ()
-        field = new_field(kind, name, rect, multiline, options)
-        self.forms_edit.emit(doc.page_key(page.index), doc.current_widgets(page.index) + (field,),
-                             f"Add {name}")
-        self.set_tool(Tool.FORM)
-        self.select_field(page.index, field.ident)
-        if kind == COMBO:
-            self.field_properties.emit(page.index, field)  # a dropdown needs its options
-
-    def delete_selected_field(self) -> bool:
-        if self._tool is not Tool.FORM:
-            return False
-        found = self.selected_field()
-        if found is None:
-            return False
-        index, gone = found
-        doc = self.document
-        self._selected_field = None
-        self.forms_edit.emit(doc.page_key(index),
-                             tuple(w for w in doc.current_widgets(index) if w.ident != gone.ident),
-                             f"Delete {gone.short_name()}")
-        return True
-
-    def _paint_fields(self, page: "PageWidget", painter: QPainter) -> None:
-        """Preparing a form: every field outlined and named, the selected
-        one solid, the one being dragged or drawn previewed. Chrome only."""
-        doc = self.document
-        selected = self.selected_field()
-        drag = self._drag
-        small = QFont("Arial")
-        small.setPixelSize(10)
-        painter.setFont(small)
-        for widget in doc.current_widgets(page.index):
-            box = self._widget_rect(page, widget.rect)
-            is_selected = selected is not None and selected[0] == page.index \
-                and selected[1].ident == widget.ident
-            painter.setPen(QPen(QColor(40, 110, 230) if is_selected else QColor(120, 120, 140),
-                                2 if is_selected else 1, Qt.SolidLine if is_selected else Qt.DashLine))
-            painter.setBrush(Qt.NoBrush)
-            painter.drawRect(box)
-            painter.setPen(QColor(40, 110, 230) if is_selected else QColor(90, 90, 110))
-            painter.drawText(QPointF(box.left() + 2, box.top() - 3), widget.short_name())
-        if drag is not None and drag["page"] is page and drag.get("end") is not None:
-            if drag["mode"] in ("fmove", "fresize"):
-                left, top, right, bottom = self._dragged_field_rect(page, drag)
-                box = QRectF(left, top, right - left, bottom - top)
-            elif drag["mode"] == "fdraw":
-                a, b = drag["press"], drag["end"]
-                box = QRectF(QPointF(min(a.x(), b.x()), min(a.y(), b.y())),
-                             QPointF(max(a.x(), b.x()), max(a.y(), b.y())))
-            else:
-                return
-            painter.fillRect(box, QColor(40, 110, 230, 40))
-            painter.setPen(QPen(QColor(40, 110, 230), 1.5, Qt.DashLine))
-            painter.drawRect(box)
-
-    def _field_key(self, index: int, widget: Widget):
-        return (self.document.pages[index].file, widget.name)
-
-    def _fill(self, page: "PageWidget", widget: Widget) -> None:
-        doc = self.document
-        if not widget.fillable:
-            self.message.emit(f"\u201c{widget.short_name()}\u201d is read-only.")
-            return
-        file = doc.pages[page.index].file
-        key = self._field_key(page.index, widget)
-        if widget.kind == TEXT:
-            self._open_field(page, widget)
-        elif widget.kind == CHECKBOX:
-            on = is_on(widget, file, doc.fields)
-            self.fields_edit.emit(key, "Off" if on else widget.on_state,
-                                  f"{'Uncheck' if on else 'Check'} {widget.short_name()}")
-        elif widget.kind == RADIO:
-            if not is_on(widget, file, doc.fields):
-                self.fields_edit.emit(key, widget.on_state,
-                                      f"Choose {widget.on_state} for {widget.short_name()}")
-        elif widget.kind == COMBO and widget.options:
-            menu = QMenu(self)
-            current = current_value(widget, file, doc.fields)
-            for option in widget.options:
-                act = menu.addAction(option)
-                act.setCheckable(True)
-                act.setChecked(option == current)
-            left, top, right, bottom = page.widget_transform().pdf_rect_to_widget(widget.rect)
-            chosen = menu.exec(page.mapToGlobal(QPoint(round(left), round(bottom))))
-            if chosen is not None and chosen.text() != current:
-                self.fields_edit.emit(key, chosen.text(), f"Choose {widget.short_name()}")
-
-    def _open_field(self, page: "PageWidget", widget: Widget) -> None:
-        self.commit_text_edit()
-        self.commit_field_edit()
-        doc = self.document
-        file = doc.pages[page.index].file
-        value = current_value(widget, file, doc.fields)
-        left, top, right, bottom = page.widget_transform().pdf_rect_to_widget(widget.rect)
-        scale = page.widget_transform().scale
-        x0, y0, x1, y1 = widget.rect
-        size = widget.font_size or auto_font_size(value, x1 - x0, y1 - y0, widget.multiline)
-        editor = _FieldEditor(page, widget.multiline)
-        font = QFont("Arial")  # Helvetica's metric twin, as the saved field uses
-        font.setPixelSize(max(1, round(size * scale)))
-        editor.setFont(font)
-        editor.document().setDocumentMargin(max(1.0, 1.5 * scale))
-        editor.setStyleSheet("QPlainTextEdit { background: white; color: black;"
-                             " border: 2px solid rgb(40,110,230); }")
-        editor.setPlainText(value)
-        editor.setGeometry(round(left), round(top), max(12, round(right - left)),
-                           max(12, round(bottom - top)))
-        self._field_editor = {"page": page, "widget": widget, "editor": editor, "value": value}
-        editor.finished.connect(self._field_finished)
-        editor.show()
-        editor.setFocus()
-        editor.selectAll()
-        self.editing_changed.emit(True)
-
-    def _field_finished(self, move: int) -> None:
-        ed = self._field_editor
-        if ed is None:
-            return
-        page, widget = ed["page"], ed["widget"]
-        if not self.commit_field_edit() or move == 0:
-            return
-        # Tab / Shift+Tab: the next or previous fillable text field, in
-        # page order and then the order the form lists them.
-        order = [(p.index, w) for p in self._pages
-                 for w in self.document.current_widgets(p.index) if w.kind == TEXT and w.fillable]
-        here = next((n for n, (i, w) in enumerate(order)
-                     if i == page.index and w.origin == widget.origin), None)
-        if here is None or not order:
-            return
-        index, nxt = order[(here + move) % len(order)]
-        if index != page.index:
-            self.scroll_to_page(index)
-        self._open_field(self._pages[index], nxt)
-
-    def commit_field_edit(self) -> bool:
-        """Close the field editor, turning what was typed into a value.
-        False if it stayed open (text the field's font can't hold)."""
-        ed = self._field_editor
-        if ed is None:
-            return True
-        editor, widget, page = ed["editor"], ed["widget"], ed["page"]
-        text = editor.toPlainText()
-        if not widget.multiline:
-            text = text.replace("\n", " ")
-        if not encodable(text):
-            self.message.emit("Only Western European characters can be typed into this "
-                              "field for now; please remove the others.")
-            editor.reopen()
-            return False
-        self._field_editor = None
-        editor.hide()
-        editor.deleteLater()
-        self.setFocus(Qt.OtherFocusReason)
-        self.editing_changed.emit(False)
-        if self.document is not None and page.document is self.document and text != ed["value"]:
-            self.fields_edit.emit(self._field_key(page.index, widget), text,
-                                  f"Fill {widget.short_name()}")
-        return True
-
-    def _new_text(self, page: "PageWidget", pos: QPoint, boxed: bool, width) -> None:
-        self._open_editor(page, pos, None, "", self.text_size, self.text_color, boxed, width)
-
-    def _edit_text(self, page: "PageWidget", annot: Annot) -> None:
-        left, top, _, _ = page.widget_transform().pdf_rect_to_widget(annot.rect)
-        width = text_box_size(annot)[0] if annot.fixed_width else None
-        self.select_annot(page.index, annot.ident)
-        self._open_editor(page, QPoint(round(left), round(top)), annot, annot.contents,
-                          annot.font_size, annot.color, annot.boxed, width)
-
-    def _open_editor(self, page, anchor: QPoint, annot, text, size, color, boxed, width) -> None:
-        self.commit_text_edit()
-        editor = _TextEditor(page)
-        editor.setLineWrapMode(
-            QPlainTextEdit.WidgetWidth if width is not None else QPlainTextEdit.NoWrap)
-        editor.setPlainText(text)
-        bar = _StyleBar(self._container, size, color)
-        self._editor = {"page": page, "widget": editor, "annot": annot, "anchor": anchor,
-                        "size": size, "color": color, "boxed": boxed, "width": width,
-                        "bar": bar}
-        self._style_editor()
-        editor.textChanged.connect(self._fit_editor)
-        editor.finished.connect(self.commit_text_edit)
-        bar.chosen.connect(self._restyle_text)
-        self._fit_editor()
-        bar.show()
-        editor.show()
-        editor.setFocus()
-        editor.moveCursor(QTextCursor.End)
-        self.editing_changed.emit(True)
-
-    def _style_editor(self) -> None:
-        """Font and colour of the open editor, from its size and colour."""
-        ed = self._editor
-        scale = ed["page"].widget_transform().scale
-        font = QFont("Arial")  # Helvetica's metric twin: wraps where the PDF will
-        font.setPixelSize(max(1, round(ed["size"] * scale)))
-        ed["widget"].setFont(font)
-        ed["widget"].document().setDocumentMargin(PADDING * scale)
-        r, g, b = (round(c * 255) for c in ed["color"])
-        ed["widget"].setStyleSheet(
-            f"QPlainTextEdit {{ color: rgb({r},{g},{b}); background: rgba(255,255,255,215);"
-            f" border: 1px dashed rgb(40,110,230); }}")
-
-    def _restyle_text(self, size, color) -> None:
-        """A pick on the style bar: restyle what's being typed, and make it
-        the default for the next text."""
-        ed = self._editor
-        if ed is None:
-            return
-        if size is not None:
-            ed["size"] = self.text_size = size
-        if color is not None:
-            ed["color"] = self.text_color = color
-        self._style_editor()
-        self._fit_editor()
-        self.text_style_changed.emit()
-
-    def _fit_editor(self) -> None:
-        ed = self._editor
-        if ed is None:
-            return
-        page = ed["page"]
-        scale = page.widget_transform().scale
-        lay = layout(ed["widget"].toPlainText(), ed["size"], ed["width"])
-        # A little extra room: Qt's line spacing differs slightly from ours,
-        # and the committed box is sized by layout(), not by this widget.
-        ed["widget"].setGeometry(ed["anchor"].x(), ed["anchor"].y(),
-                                 math.ceil(lay.width * scale) + 4,
-                                 math.ceil(lay.height * scale * 1.05) + 4)
-        # The style bar sits just above the text, or below it at a page's
-        # top edge; the text grows downward, so re-place it every time.
-        bar = ed["bar"]
-        box = ed["widget"].geometry().translated(page.pos())
-        y = box.top() - bar.height() - 4
-        if y < page.y() + 4:
-            y = box.bottom() + 5
-        bar.move(*self._clamped(bar, box.left(), y))
-        bar.raise_()
-
-    def commit_text_edit(self) -> None:
-        """Close the text editor, turning what was typed into an edit."""
-        ed = self._editor
-        if ed is None:
-            return
-        widget, page = ed["widget"], ed["page"]
-        text = widget.toPlainText().rstrip()
-        if not encodable(text):
-            # Refuse rather than save question marks. The editor stays open.
-            self.message.emit("Only Western European characters can be typed into PDF text "
-                              "boxes for now; please remove the others.")
-            widget.reopen()
-            return
-        self._editor = None
-        widget.hide()
-        widget.deleteLater()
-        ed["bar"].hide()
-        ed["bar"].deleteLater()
-        self.setFocus(Qt.OtherFocusReason)
-        self.editing_changed.emit(False)
-        # However typing ended -- click away, Esc, Ctrl+Enter -- it ends the
-        # text tool too (the user asked for this; an idle click shouldn't
-        # spawn a box).
-        if self._tool in TEXT_TOOLS:
-            self.set_tool(Tool.SELECT)
-
-        index = page.index
-        if self.document is None or page.document is not self.document                 or index >= self.document.page_count:
-            return  # the page it was typed on is gone; nothing to attach it to
-        scale = page.widget_transform().scale
-        lay = layout(text, ed["size"], ed["width"])
-        ax, ay = ed["anchor"].x(), ed["anchor"].y()
-        rect = page.widget_transform().widget_rect_to_pdf(
-            (ax, ay, ax + lay.width * scale, ay + lay.height * scale))
-        key = self.document.page_key(index)
-        annots = self.document.page_annots(index)
-        old = ed["annot"]
-        if old is None:
-            if text.strip():
-                new = new_text(rect, text, self.author, ed["size"], ed["color"], ed["boxed"],
-                               self.document.page_rotation(index))
-                self.annots_edit.emit(key, annots + (new,),
-                                      "Add Text Box" if ed["boxed"] else "Add Text")
-                self.select_annot(index, new.ident)
-        elif not text.strip():
-            self.annots_edit.emit(key, without(annots, old), "Delete Text")
-        elif (text, ed["size"], tuple(ed["color"])) != \
-                (old.contents, old.font_size, tuple(old.color)):
-            # A new colour or size alone is an edit too (the style bar).
-            changed = replace(old, contents=text, rect=rect, font_size=ed["size"],
-                              color=ed["color"], edited=True, reshaped=True)
-            self.annots_edit.emit(key, tuple(changed if a.ident == old.ident else a
-                                             for a in annots), "Edit Text")
 
     def delete_selected_annot(self) -> bool:
         found = self.selected_annot()

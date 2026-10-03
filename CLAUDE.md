@@ -54,6 +54,12 @@ pdfapp/
                  select/move/delete. Emits edit requests; never edits.
                  No view rotation in the UI (removed, user's call); the
                  view_rotation plumbing under it stays, always 0.
+                 PdfView = mixins sharing its state: viewdraw.py (shapes,
+                 ink, stamps, signature boxes), viewtext.py (text boxes,
+                 resizing), viewforms.py (filling, Edit Fields). tools.py:
+                 Tool/FitMode and the tool groups; viewbars.py: the in-place
+                 editors, mark bar and style bar. New page work goes in the
+                 mixin it belongs to, not back into pageview.py.
   ocrlayer.py    OCR text layer as data (OcrWord, OcrEdits) + the invisible-text
                  content/font and a hand-written one-page PDF for the preview.
                  No libs. Words are text matrices over a glyphless Identity-H
