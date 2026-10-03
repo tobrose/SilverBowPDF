@@ -297,9 +297,12 @@ def test_a_second_launch_opens_in_a_new_tab():
         try:
             w.open_path(_pdf(tmp / "a.pdf", 1, "A"))
             b = _pdf(tmp / "b.pdf", 2, "B")
-            assert _send([str(b)], name)
+            assert _send([str(b)], name), "handover"
             _settle()
-            assert w.tabs.count() == 2 and w.view.document.path == b
+            assert w.tabs.count() == 2, f"{w.tabs.count()} tabs"
+            # Same file, not same spelling: the newcomer sends absolute paths,
+            # and a short (8.3) temp folder like GitHub's comes back long.
+            assert os.path.samefile(w.view.document.path, b), w.view.document.path
         finally:
             server.close()
 
