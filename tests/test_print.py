@@ -26,6 +26,7 @@ from pdfapp.document import PdfDocument  # noqa: E402
 from pdfapp.printing import place_on_sheet, print_pages  # noqa: E402
 from pdfapp.rendering import PageRenderer  # noqa: E402
 from pdfapp.settings import Settings  # noqa: E402
+from patching import patched  # noqa: E402
 from test_annots import _make_annotated_pdf  # noqa: E402  (3 pages: annots, a form field, /Rotate 90)
 
 _app = QApplication.instance() or QApplication([])
@@ -156,22 +157,10 @@ def test_dialog_page_ranges():
             w.close()
 
 
-class _Patched:
-    """Swap names in mainwindow's module for one test (Windows' print dialog
-    would block, and this machine's printers aren't the users')."""
-
-    def __init__(self, **names):
-        import pdfapp.mainwindow as mw
-        self.mw, self.names, self.saved = mw, names, {}
-
-    def __enter__(self):
-        for k, v in self.names.items():
-            self.saved[k] = getattr(self.mw, k)
-            setattr(self.mw, k, v)
-
-    def __exit__(self, *exc):
-        for k, v in self.saved.items():
-            setattr(self.mw, k, v)
+def _Patched(**names):
+    """Stand-ins for one test: Windows' print dialog would block, and this
+    machine's printers aren't the users' (patching.patched)."""
+    return patched(**names)
 
 
 def _fake_dialog(accept: bool, seen: list):

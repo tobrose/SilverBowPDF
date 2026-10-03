@@ -357,6 +357,7 @@ from PySide6.QtGui import QMouseEvent  # noqa: E402
 
 from pdfapp.pageview import Tool  # noqa: E402
 from pdfapp.settings import Settings  # noqa: E402
+from patching import patched  # noqa: E402
 
 
 @contextmanager
@@ -376,17 +377,8 @@ def _app_window(tmp, pdf_path, password=None):
         w.close()
 
 
-@contextmanager
 def _patched(**names):
-    import pdfapp.mainwindow as mw
-    saved = {k: getattr(mw, k) for k in names}
-    for k, v in names.items():
-        setattr(mw, k, v)
-    try:
-        yield
-    finally:
-        for k, v in saved.items():
-            setattr(mw, k, v)
+    return patched(**names)
 
 
 def _fake_sign_dialog(pfx, password, picture=None):

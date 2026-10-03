@@ -104,7 +104,12 @@ pdfapp/
                  Windows' dialog.
   thumbnails.py  Page sidebar: multi-select, drag-to-reorder, lazy thumbnails.
                  Emits requests only; MainWindow makes the PageList edit.
-  mainwindow.py  Menus, toolbar, status bar, drag-and-drop.
+  mainwindow.py  Menus, toolbar, status bar, drag-and-drop, edits and undo.
+                 MainWindow = mixins: fileflow.py (open, insert, extract,
+                 save), jobs.py (print, OCR), accessflow.py (restrictions,
+                 Unlock, Password Protection), signflow.py (Sign menu).
+                 Tests swap dialogs with tests/patching.py, which patches a
+                 name in every pdfapp module that has it.
   errors.py      sys.excepthook: an exception in any Qt slot is shown in a
                  message box and appended to
                  %APPDATA%\SilverbowPDF\SilverbowPDF-errors.log -- roaming

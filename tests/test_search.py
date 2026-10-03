@@ -29,6 +29,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 from pdfapp.document import PdfDocument  # noqa: E402
 from pdfapp.pageview import Tool  # noqa: E402
 from pdfapp.settings import Settings  # noqa: E402
+from patching import patched  # noqa: E402
 
 _app = QApplication.instance() or QApplication([])
 
@@ -342,7 +343,6 @@ def test_every_menu_action_runs():
     cancel. An exception in an action's slot goes to sys.excepthook --
     which in the installed app (no console) used to mean "does nothing";
     that's how File > Print shipped broken. Caught here instead."""
-    import pdfapp.mainwindow as mw
     from PySide6.QtGui import QAction
     from PySide6.QtWidgets import QDialog, QFileDialog, QInputDialog, QMessageBox
 
@@ -376,15 +376,12 @@ def test_every_menu_action_runs():
     errors = []
     saved_hook = sys.excepthook
     sys.excepthook = lambda *exc: errors.append(exc)
-    patched = dict(QMessageBox=Box, QFileDialog=Files, QInputDialog=Inputs,
-                   QPrintDialog=Cancelled, PrintPreview=Cancelled, ProtectionDialog=Cancelled,
-                   SignDialog=Cancelled, CreateIDDialog=Cancelled, SignaturesDialog=Cancelled,
-                   choose_picture=lambda *a, **k: None)
-    saved = {k: getattr(mw, k) for k in patched}
-    for k, v in patched.items():
-        setattr(mw, k, v)
+    stand_ins = dict(QMessageBox=Box, QFileDialog=Files, QInputDialog=Inputs,
+                     QPrintDialog=Cancelled, PrintPreview=Cancelled, ProtectionDialog=Cancelled,
+                     SignDialog=Cancelled, CreateIDDialog=Cancelled, SignaturesDialog=Cancelled,
+                     choose_picture=lambda *a, **k: None)
     try:
-        with _window() as w:
+        with patched(**stand_ins), _window() as w:
             skip = {w.act_quit, w.act_close}  # end the session; closing is tested elsewhere
             actions = [a for a in w.findChildren(QAction) if a not in skip and a.text()]
             ran = 0
@@ -397,8 +394,6 @@ def test_every_menu_action_runs():
             assert ran > 30, f"only {ran} actions ran"
             w.close_document()  # last: Close, with the (cancelling) save prompt
     finally:
-        for k, v in saved.items():
-            setattr(mw, k, v)
         sys.excepthook = saved_hook
     assert not errors, "\n".join(f"{e[0].__name__}: {e[1]}" for e in errors)
 
