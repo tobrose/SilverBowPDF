@@ -110,6 +110,21 @@ pdfapp/
                  Unlock, Password Protection), signflow.py (Sign menu).
                  Tests swap dialogs with tests/patching.py, which patches a
                  name in every pdfapp module that has it.
+                 One tab per document: view, sidebar, find_bar, history,
+                 the bars... are properties reading the CURRENT tab, so the
+                 code reads as single-document. Tab views' signals reach
+                 MainWindow only while their tab is current (_add_tab's
+                 guard); per-tab state that must change regardless (a
+                 closed document's history) is the tab's own business.
+  doctab.py      DocumentTab: one document's view, find bar, notice bars,
+                 page sidebar (in the dock's stack) and undo history. Out
+                 of sight it releases its rendered and pdfium pages.
+  instance.py    One app per user session: a second launch hands its files
+                 to the running one over a named pipe and exits. The pipe
+                 name holds user + session; UserAccessOption limits who
+                 connects; and the newcomer checks the LISTENER is this
+                 user in this session before sending (Windows lets anyone
+                 listen under a taken pipe name).
   errors.py      sys.excepthook: an exception in any Qt slot is shown in a
                  message box and appended to
                  %APPDATA%\SilverbowPDF\SilverbowPDF-errors.log -- roaming
@@ -354,6 +369,19 @@ orange and scrolled into view. Page edits rescan quietly (no jump).
 Pan tool (hand, sticky until Esc; no letter -- H is Highlight) and
 middle-drag pans in every tool, gaps between pages included.
 
+Tabs (user's call, 2026-10-02, instead of a copy of the app per PDF):
+every document opens in its own tab -- File > Open, drag-and-drop, the
+command line, and a second launch from Explorer/email, which hands over
+to the running app (instance.py) and exits. An empty window shows no tab
+strip; its one empty tab is reused by the next open. Opening a file
+that's already open switches to its tab. Close (Ctrl+W, the tab's X)
+asks to save that tab; the last tab closes to the empty start page.
+Closing the window asks for each unsaved tab in turn, shown as it asks.
+Ctrl+Tab / Ctrl+Shift+Tab (and Ctrl+PgDn / PgUp) switch. Unsaved tabs
+carry a dot. Style choices (colours, sizes, stamp, signature picture)
+follow from tab to tab. A tab out of sight releases its memory.
+A file handed over while a dialog is open waits until it closes.
+
 Toolbar / Tools menu layout (user's): Select, Pan, Annotate (drop-down: note,
 text markup, typewriter/text box, shapes/pen, stamps, style menus), Form
 (drop-down: Edit Fields + field tools). The buttons keep their labels and
@@ -456,6 +484,10 @@ depend on one being there.
   a file already has are kept on save and honoured.
 - Certificate (public-key) security isn't supported: pdfium can't open it.
 - Unlock lasts until the document is closed; the file keeps its restrictions.
+- Tabs aren't restored after the app closes (no session restore), and a
+  tab can't be dragged out into a window of its own.
+- Two copies started at the same instant both run (each listens on the
+  pipe); later launches go to either. Harmless, just two windows.
 
 - Signature checks don't look up revocation (no network on open: opening
   a PDF shouldn't stall on an OCSP server), so a revoked certificate still

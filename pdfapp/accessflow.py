@@ -54,18 +54,14 @@ class AccessMixin:
             off.append(self.act_print)
         for act in off:
             act.setEnabled(False)
-        self.annotate_button.setEnabled(a.annotate)
-        self.form_button.setEnabled(a.modify)
+        # Every item in these two needs a document. (Sign keeps going without
+        # one: choosing a picture or making a digital ID doesn't.)
+        has_document = self.view.document is not None
+        self.annotate_button.setEnabled(a.annotate and has_document)
+        self.form_button.setEnabled(a.modify and has_document)
         for act in (self.act_signatures,):  # needs a document, not permission
             act.setEnabled(self.view.document is not None)
-        restricted = a.restricted() if self.view.document is not None else []
-        if restricted:
-            listed = ", ".join(restricted[:-1]) + (" and " if len(restricted) > 1 else "") \
-                + restricted[-1]
-            self.restriction_text.setText(
-                f"<b>Restricted by the document's author:</b> {listed} "
-                f"{'is' if len(restricted) == 1 else 'are'} turned off.")
-        self.restriction_bar.setVisible(bool(restricted))
+        self.current.show_restrictions(a.restricted() if self.view.document is not None else [])
 
     def unlock(self, password: Optional[str] = None) -> bool:
         """Reopen with the owner password (asked for if not given), which

@@ -12,6 +12,8 @@ for rendering and pikepdf (qpdf) for saving.
   digital ID file you create), with your signature picture on it, and see on
   opening whether a document's signatures are valid. Or just place your
   signature picture, Fill & Sign style.
+- **Tabs:** every PDF opens in its own tab of one window -- including ones
+  opened from Explorer or email while SilverbowPDF is already running.
 - **Find, print** (with preview), **password protection** (AES-256), and
   respect for the restrictions a PDF's author set.
 - Built to be deployed: a single-click installer with silent install, an
@@ -57,7 +59,8 @@ on a headless box.
 
 | | |
 |---|---|
-| `Ctrl+O` / `Ctrl+W` | Open / close |
+| `Ctrl+O` / `Ctrl+W` | Open (in a new tab) / close the tab |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab (also `Ctrl+PgDn` / `Ctrl+PgUp`) |
 | `Ctrl++` `Ctrl+-` `Ctrl+0` | Zoom in / out / 100% |
 | `Ctrl+1` `Ctrl+2` | Fit width / fit page |
 | `F4` | Show / hide page thumbnails |
@@ -96,7 +99,7 @@ on a headless box.
 | Details… on the signature bar | Who signed, when, and whether the document changed since |
 | Pan button, or drag with the middle mouse button | Drag the page to scroll; `Esc` back to Select |
 
-Drag a PDF onto the window to open it.
+Drag PDFs onto the window to open them, each in its own tab.
 
 ## Layout
 
@@ -113,11 +116,15 @@ pdfapp/
   document.py      pypdfium2 wrapper. No Qt imports, testable headless.
   writer.py        Saves edits with pikepdf: temp file, verify, atomic replace.
   rendering.py     pdfium bitmap -> QImage, plus an LRU page cache.
-  pageview.py      Continuous scrolling view, zoom, tools, text selection.
+  pageview.py      Continuous scrolling view, zoom, text selection; its tools in
+                   viewdraw.py, viewtext.py, viewforms.py (tools.py names them).
   findbar.py       Ctrl+F find bar.
   printing.py      Printing; printpreview.py is the preview before it.
   thumbnails.py    Page sidebar: select, drag to reorder, lazy thumbnails.
-  mainwindow.py    Menus, toolbar, status bar, drag-and-drop.
+  mainwindow.py    Menus, toolbar, status bar, tabs (doctab.py: one document);
+                   fileflow, jobs, accessflow, signflow hold its file, print/OCR,
+                   protection and signing commands.
+  instance.py      One app per user session: a second launch opens in a tab.
   errors.py        Unexpected errors are shown and logged, never lost.
   selftest.py      --self-test: proves an installed build works.
 packaging/         PyInstaller spec, Inno Setup installer script, build.ps1.

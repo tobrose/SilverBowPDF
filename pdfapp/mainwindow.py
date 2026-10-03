@@ -6,7 +6,7 @@ import getpass
 from dataclasses import replace
 from typing import Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -17,20 +17,17 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QPlainTextEdit,
     QDockWidget,
-    QFrame,
-    QHBoxLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
     QMenu,
     QMessageBox,
-    QPushButton,
     QSpinBox,
+    QStackedWidget,
+    QTabWidget,
     QToolBar,
     QToolButton,
-    QVBoxLayout,
-    QWidget,
 )
 
 from .annots import (
@@ -46,12 +43,11 @@ from .annots import (
     new_note,
 )
 from .document import PdfDocument
-from .findbar import FindBar
+from .doctab import DocumentTab
 from .pagelist import History, PageList
 from .fields import COMBO, FLAG_MULTILINE, FLAG_READONLY, FLAG_REQUIRED, TEXT
 from .pageview import FitMode, PdfView, Tool
 from .settings import Settings
-from .thumbnails import ThumbnailSidebar
 from .accessflow import AccessMixin
 from .fileflow import FilesMixin
 from .jobs import JobsMixin
@@ -80,80 +76,31 @@ class MainWindow(FilesMixin, JobsMixin, AccessMixin, SigningMixin, QMainWindow):
         self.setAcceptDrops(True)
 
         self.settings = settings if settings is not None else Settings()
-        self.history: Optional[History[DocState]] = None
         # Set while reopening the same file with edits intact (a failed save),
         # so document_opened doesn't wipe the undo history.
         self._keep_history = False
-
-        self.view = PdfView(self)
-        self.find_bar = FindBar(self.view, self)
-        # Says what a restricted document's author has turned off, and offers
-        # the owner password -- mouse users need the why, not just grey buttons.
-        self.restriction_bar = QFrame(self)
-        self.restriction_bar.setObjectName("restrictions")
-        # Explicit colours for the button too: in Windows' dark mode it would
-        # draw pale text on this pale bar (seen, not guessed).
-        self.restriction_bar.setStyleSheet(
-            "#restrictions { background: #fff4ce; border-bottom: 1px solid #e0c870; }"
-            "QLabel { color: #3b3000; }"
-            "QPushButton { color: #1e1e1e; background: #ffffff; border: 1px solid #b89b2e;"
-            " border-radius: 3px; padding: 3px 14px; }"
-            "QPushButton:hover { background: #fffbe8; }"
-            "QPushButton:pressed { background: #f3e6b0; }")
-        row = QHBoxLayout(self.restriction_bar)
-        row.setContentsMargins(10, 5, 10, 5)
-        self.restriction_text = QLabel(self.restriction_bar)
-        self.restriction_text.setWordWrap(True)
-        row.addWidget(self.restriction_text, 1)
-        unlock = QPushButton("Unlock…", self.restriction_bar)
-        unlock.setToolTip("Enter the owner password to lift the restrictions")
-        unlock.clicked.connect(self.unlock)
-        row.addWidget(unlock)
-        self.restriction_bar.hide()
-        # Says whether the document's digital signatures check out.
-        self.signature_bar = QFrame(self)
-        self.signature_bar.setObjectName("signatures")
-        sig_row = QHBoxLayout(self.signature_bar)
-        sig_row.setContentsMargins(10, 5, 10, 5)
-        self.signature_text = QLabel(self.signature_bar)
-        self.signature_text.setWordWrap(True)
-        self.signature_text.setTextFormat(Qt.RichText)
-        sig_row.addWidget(self.signature_text, 1)
-        details = QPushButton("Details…", self.signature_bar)
-        details.clicked.connect(lambda: self.show_signatures())
-        sig_row.addWidget(details)
-        self.signature_bar.hide()
-        self._signature_infos: list = []
         self._picture = None  # the user's signature picture, once loaded
-        central = QWidget(self)
-        column = QVBoxLayout(central)
-        column.setContentsMargins(0, 0, 0, 0)
-        column.setSpacing(0)
-        column.addWidget(self.signature_bar)
-        column.addWidget(self.restriction_bar)
-        column.addWidget(self.find_bar)
-        column.addWidget(self.view, 1)
-        self.setCentralWidget(central)
-        self.view.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.view.customContextMenuRequested.connect(self._page_context_menu)
-        self.view.annots_edit.connect(self._on_annots_edit)
-        self.view.fields_edit.connect(self._on_fields_edit)
-        self.view.forms_edit.connect(self._on_forms_edit)
-        self.view.field_properties.connect(self._edit_field_properties)
-        self.view.annot_open.connect(self._on_annot_open)
-        self.view.note_requested.connect(self._on_note_requested)
+        self._shown_tab: Optional[DocumentTab] = None
 
-        self.sidebar = ThumbnailSidebar(self)
+        # One tab per open document (user's call, 2026-10-02). Everything
+        # per document lives in its DocumentTab; the menus and toolbars here
+        # act on the current one through view, sidebar, history...
+        self.tabs = QTabWidget(self)
+        self.tabs.setDocumentMode(True)
+        self.tabs.setTabsClosable(True)
+        self.tabs.setMovable(True)
+        self.tabs.setElideMode(Qt.ElideMiddle)
+        self.tabs.tabCloseRequested.connect(self.close_tab)
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+        self.setCentralWidget(self.tabs)
+
+        # Each tab's page sidebar, stacked: the dock shows the current one's.
+        self.sidebar_stack = QStackedWidget(self)
         self.sidebar_dock = QDockWidget("Pages", self)
         self.sidebar_dock.setObjectName("pages_dock")
-        self.sidebar_dock.setWidget(self.sidebar)
+        self.sidebar_dock.setWidget(self.sidebar_stack)
         self.sidebar_dock.setFeatures(QDockWidget.DockWidgetClosable)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.sidebar_dock)
-        self.sidebar.page_activated.connect(self.view.scroll_to_page)
-        self.sidebar.move_requested.connect(self._on_drop)
-        self.sidebar.delete_requested.connect(self.delete_pages)
-        self.sidebar.context_requested.connect(self._pages_menu)
-        self.sidebar.files_dropped.connect(self.insert_files)
 
         self._building_ui = True
         self._build_actions()
@@ -162,12 +109,143 @@ class MainWindow(FilesMixin, JobsMixin, AccessMixin, SigningMixin, QMainWindow):
         self._build_statusbar()
         self._building_ui = False
 
-        self.view.page_changed.connect(self._on_page_changed)
-        self.view.zoom_changed.connect(self._on_zoom_changed)
-        self.view.document_opened.connect(self._on_document_opened)
-
-        self._set_document_actions_enabled(False)
+        self._add_tab()  # the first, empty: "Open a PDF to get started"
         self._apply_letter_shortcuts()
+
+    # ---- tabs ----------------------------------------------------------
+
+    @property
+    def current(self) -> DocumentTab:
+        return self.tabs.currentWidget()
+
+    # The current tab's parts, under the names MainWindow has always used.
+    view = property(lambda self: self.current.view)
+    find_bar = property(lambda self: self.current.find_bar)
+    sidebar = property(lambda self: self.current.sidebar)
+    signature_bar = property(lambda self: self.current.signature_bar)
+    signature_text = property(lambda self: self.current.signature_text)
+    restriction_bar = property(lambda self: self.current.restriction_bar)
+    restriction_text = property(lambda self: self.current.restriction_text)
+
+    @property
+    def history(self) -> Optional[History[DocState]]:
+        return self.current.history
+
+    @history.setter
+    def history(self, history: Optional[History[DocState]]) -> None:
+        self.current.history = history
+
+    @property
+    def _signature_infos(self) -> list:
+        return self.current.signature_infos
+
+    @_signature_infos.setter
+    def _signature_infos(self, infos: list) -> None:
+        self.current.signature_infos = infos
+
+    def tab_list(self) -> list:
+        return [self.tabs.widget(i) for i in range(self.tabs.count())]
+
+    def _add_tab(self) -> DocumentTab:
+        """A new, empty tab, made current."""
+        tab = DocumentTab(self)
+
+        def on(signal, slot):
+            # Only the tab on screen speaks to the window: a background tab's
+            # view can still emit (a resize refits it), and must not move the
+            # page counter or the sidebar of the tab being looked at.
+            signal.connect(lambda *args: slot(*args) if self.current is tab else None)
+
+        v = tab.view
+        on(v.customContextMenuRequested, self._page_context_menu)
+        on(v.annots_edit, self._on_annots_edit)
+        on(v.fields_edit, self._on_fields_edit)
+        on(v.forms_edit, self._on_forms_edit)
+        on(v.field_properties, self._edit_field_properties)
+        on(v.annot_open, self._on_annot_open)
+        on(v.note_requested, self._on_note_requested)
+        on(v.page_changed, self._on_page_changed)
+        on(v.zoom_changed, self._on_zoom_changed)
+        on(v.document_opened, self._on_document_opened)
+        on(v.signature_box, self.sign_with_certificate)
+        on(v.tool_changed, self._on_tool_changed)
+        on(v.editing_changed, self._on_editing_changed)
+        on(v.message, lambda text: self.statusBar().showMessage(text, 8000))
+        on(v.text_selection_changed,
+           lambda has: self.act_copy.setEnabled(has and self.access.copy))
+        on(v.text_style_changed, self._show_text_style)
+        on(v.highlight_color_changed, lambda c: self.act_tool_highlight.setIcon(self._swatch(c)))
+        on(tab.sidebar.move_requested, self._on_drop)
+        on(tab.sidebar.delete_requested, self.delete_pages)
+        on(tab.sidebar.context_requested, self._pages_menu)
+        on(tab.sidebar.files_dropped, self.insert_files)
+        tab.unlock_button.clicked.connect(lambda: self.unlock())
+        tab.details_button.clicked.connect(lambda: self.show_signatures())
+
+        if self._shown_tab is not None:
+            self._carry_style(self._shown_tab.view, v)
+        self.sidebar_stack.addWidget(tab.sidebar)
+        self.tabs.setCurrentIndex(self.tabs.addTab(tab, tab.title()))
+        return tab
+
+    @staticmethod
+    def _carry_style(old: PdfView, new: PdfView) -> None:
+        """Colours, sizes, the stamp and the signature picture are the user's
+        choices, not a document's: they follow from tab to tab."""
+        for name in ("highlight_color", "text_size", "text_color", "shape_color",
+                     "shape_width", "stamp", "signature_image"):
+            setattr(new, name, getattr(old, name))
+
+    def _remove_tab(self, tab: DocumentTab) -> None:
+        tab.view.set_document(None)  # closes the document (and its file handles)
+        if self._shown_tab is tab:
+            self._shown_tab = None
+        self.tabs.removeTab(self.tabs.indexOf(tab))
+        self.sidebar_stack.removeWidget(tab.sidebar)
+        tab.sidebar.deleteLater()
+        tab.deleteLater()
+
+    def close_tab(self, index: int) -> bool:
+        """A tab's close button: that tab, with the usual save prompt."""
+        self.tabs.setCurrentIndex(index)
+        return self.close_document()
+
+    def _on_tab_changed(self, index: int) -> None:
+        tab = self.tabs.widget(index)
+        previous, self._shown_tab = self._shown_tab, tab
+        if tab is None:
+            return
+        if previous is not None and previous is not tab:
+            self._carry_style(previous.view, tab.view)
+            previous.release_memory()
+        self.sidebar_stack.setCurrentWidget(tab.sidebar)
+        self._sync_chrome()
+
+    def _update_tabs(self) -> None:
+        for tab in self.tab_list():
+            i = self.tabs.indexOf(tab)
+            self.tabs.setTabText(i, tab.title())
+            self.tabs.setTabToolTip(i, str(tab.document.path) if tab.document else "")
+        # No tab strip for an empty window: just the "open a PDF" page.
+        self.tabs.tabBar().setVisible(self.tabs.count() > 1 or self.current.document is not None)
+
+    def next_tab(self, step: int = 1) -> None:
+        if self.tabs.count() > 1:
+            self.tabs.setCurrentIndex((self.tabs.currentIndex() + step) % self.tabs.count())
+
+    def open_paths(self, paths: list) -> None:
+        """Files handed over by a second launch (instance.py): each in its own
+        tab, then the window comes forward. Waits while a dialog is open --
+        a print or OCR job in progress mustn't find the tab switched under it."""
+        if QApplication.activeModalWidget() is not None:
+            QTimer.singleShot(500, lambda: self.open_paths(paths))
+            return
+        for path in paths:
+            self.open_path(path)
+        if self.isMinimized():
+            self.showNormal()
+        self.raise_()
+        self.activateWindow()
 
     # ---- construction --------------------------------------------------
 
@@ -192,17 +270,17 @@ class MainWindow(FilesMixin, JobsMixin, AccessMixin, SigningMixin, QMainWindow):
         self.act_redo.setShortcuts([QKeySequence.Redo, QKeySequence("Ctrl+Shift+Z")])
 
         self.act_zoom_in = QAction("Zoom &In", self, shortcut=QKeySequence.ZoomIn,
-                                   triggered=self.view.zoom_in)
+                                   triggered=lambda: self.view.zoom_in())
         # Ctrl+= as well, because half the world's keyboards make Ctrl++ awkward.
         self.act_zoom_in.setShortcuts([QKeySequence.ZoomIn, QKeySequence("Ctrl+=")])
         self.act_zoom_out = QAction("Zoom &Out", self, shortcut=QKeySequence.ZoomOut,
-                                    triggered=self.view.zoom_out)
+                                    triggered=lambda: self.view.zoom_out())
         self.act_zoom_100 = QAction("Actual Size", self, shortcut=QKeySequence("Ctrl+0"),
                                     triggered=lambda: self.view.set_scale(1.0, FitMode.FIXED))
         self.act_fit_width = QAction("Fit &Width", self, shortcut=QKeySequence("Ctrl+1"),
-                                     triggered=self.view.fit_width)
+                                     triggered=lambda: self.view.fit_width())
         self.act_fit_page = QAction("Fit &Page", self, shortcut=QKeySequence("Ctrl+2"),
-                                    triggered=self.view.fit_page)
+                                    triggered=lambda: self.view.fit_page())
 
         # No "rotate view": it was removed (user's call) because a turned view
         # on top of turned pages confused people. Rotation is a page edit only.
@@ -392,24 +470,31 @@ class MainWindow(FilesMixin, JobsMixin, AccessMixin, SigningMixin, QMainWindow):
         self.act_select_all = QAction("Select &All", self, shortcut=QKeySequence.SelectAll,
                                       triggered=self.select_all)
         self.act_find = QAction("&Find…", self, shortcut=QKeySequence.Find,
-                                triggered=self.find_bar.open)
+                                triggered=lambda: self.find_bar.open())
         self.act_find_next = QAction("Find &Next", self, shortcut=QKeySequence("F3"),
-                                     triggered=self.find_bar.find_next)
+                                     triggered=lambda: self.find_bar.find_next())
         self.act_find_prev = QAction("Find Pre&vious", self, shortcut=QKeySequence("Shift+F3"),
-                                     triggered=self.find_bar.find_previous)
+                                     triggered=lambda: self.find_bar.find_previous())
         self.act_delete_annot = QAction("Delete Annotation", self,
-                                        triggered=self.view.delete_selected_annot)
+                                        triggered=lambda: self.view.delete_selected_annot())
 
         self.act_next = QAction("Next Page", self, shortcut=QKeySequence("PgDown"),
-                                triggered=self.view.next_page)
+                                triggered=lambda: self.view.next_page())
         self.act_prev = QAction("Previous Page", self, shortcut=QKeySequence("PgUp"),
-                                triggered=self.view.previous_page)
+                                triggered=lambda: self.view.previous_page())
         self.act_first = QAction("First Page", self, shortcut=QKeySequence("Ctrl+Home"),
                                  triggered=lambda: self.view.scroll_to_page(0))
         self.act_last = QAction("Last Page", self, shortcut=QKeySequence("Ctrl+End"),
                                 triggered=self._goto_last)
         self.act_goto = QAction("&Go to Page…", self, shortcut=QKeySequence("Ctrl+G"),
                                 triggered=self._goto_dialog)
+        # Tabs: Ctrl+Tab as in browsers, and Ctrl+PgDn/PgUp (PgDn alone is
+        # the next page).
+        self.act_next_tab = QAction("Next Tab", self, triggered=lambda: self.next_tab(1))
+        self.act_next_tab.setShortcuts([QKeySequence("Ctrl+Tab"), QKeySequence("Ctrl+PgDown")])
+        self.act_prev_tab = QAction("Previous Tab", self, triggered=lambda: self.next_tab(-1))
+        self.act_prev_tab.setShortcuts([QKeySequence("Ctrl+Shift+Tab"),
+                                        QKeySequence("Ctrl+PgUp")])
 
     def _build_toolbar(self) -> None:
         bar = QToolBar("Main", self)
@@ -467,15 +552,6 @@ class MainWindow(FilesMixin, JobsMixin, AccessMixin, SigningMixin, QMainWindow):
         self.sign_button.setMenu(self.sign_menu)
         self.sign_button.setPopupMode(QToolButton.InstantPopup)
         tools.addWidget(self.sign_button)
-        self.view.signature_box.connect(self.sign_with_certificate)
-        self.view.tool_changed.connect(self._on_tool_changed)
-        self.view.editing_changed.connect(self._on_editing_changed)
-        self.view.message.connect(lambda text: self.statusBar().showMessage(text, 8000))
-        self.view.text_selection_changed.connect(
-            lambda has: self.act_copy.setEnabled(has and self.access.copy))
-        self.view.text_style_changed.connect(self._show_text_style)
-        self.view.highlight_color_changed.connect(
-            lambda c: self.act_tool_highlight.setIcon(self._swatch(c)))
 
     def _build_menus(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
@@ -526,6 +602,9 @@ class MainWindow(FilesMixin, JobsMixin, AccessMixin, SigningMixin, QMainWindow):
         toggle.setText("Page &Thumbnails")
         toggle.setShortcut(QKeySequence("F4"))
         view_menu.addAction(toggle)
+        view_menu.addSeparator()
+        view_menu.addAction(self.act_next_tab)
+        view_menu.addAction(self.act_prev_tab)
 
         pages_menu = self.menuBar().addMenu("&Pages")
         pages_menu.addAction(self.act_page_rot_ccw)
@@ -900,6 +979,7 @@ class MainWindow(FilesMixin, JobsMixin, AccessMixin, SigningMixin, QMainWindow):
         self.act_redo.setEnabled(h is not None and h.can_redo())
         self.act_undo.setText(f"&Undo {h.undo_label()}" if h and h.can_undo() else "&Undo")
         self.act_redo.setText(f"&Redo {h.redo_label()}" if h and h.can_redo() else "&Redo")
+        self._update_tabs()  # the unsaved-changes dot on the tab
 
     def _page_context_menu(self, pos) -> None:
         """Right-click in the page view: acts on exactly the page clicked."""
@@ -944,24 +1024,47 @@ class MainWindow(FilesMixin, JobsMixin, AccessMixin, SigningMixin, QMainWindow):
     # ---- signal handlers -----------------------------------------------
 
     def _on_document_opened(self, document: Optional[PdfDocument]) -> None:
+        """The current tab opened (or closed) a document: set the tab up, then
+        the window's chrome to match."""
         self.sidebar.set_document(document)
         self.view.set_tool(Tool.SELECT)
         if document is None:
             self.history = None
+            self._check_signatures(None)
+            self._sync_chrome()
+            return
+        if not self._keep_history:
+            self.history = History(DocState(document.pages))
+        self._check_signatures(document)
+        self._sync_chrome()
+        if not any(document.has_text(i) for i in range(min(3, document.page_count))):
+            self.statusBar().showMessage(
+                "This PDF looks scanned (its pages are pictures, with no text). "
+                "Tools > Recognize Text (OCR) makes it searchable.", 15000)
+
+    def _sync_chrome(self) -> None:
+        """Title, page counter, zoom box, status bar, tool buttons and which
+        actions are on -- all from the current tab. On opening a document and
+        on switching tabs."""
+        document = self.view.document
+        self._set_document_actions_enabled(document is not None)
+        self._on_tool_changed(self.view.tool)
+        self._show_text_style()
+        self.act_tool_highlight.setIcon(self._swatch(self.view.highlight_color))
+        self.act_copy.setEnabled(bool(self.view.selected_text()) and self.access.copy)
+        self._update_tabs()
+        if document is None:
             self.setWindowTitle(APP_NAME)
+            self.setWindowModified(False)
             self.page_spin.setRange(1, 1)
             self.page_total.setText(" of 0 ")
             self.status_left.setText("No document")
             self.status_right.setText("")
-            self._set_document_actions_enabled(False)
-            self._check_signatures(None)
             return
-
-        if not self._keep_history:
-            self.history = History(DocState(document.pages))
         # [*] is where Qt draws the unsaved-changes marker (setWindowModified).
         self.setWindowTitle(f"{document.path.name}[*] — {APP_NAME}")
         self._refresh_page_count()
+        self._on_zoom_changed(self.view.scale)
         forms = "  ·  has form fields" if document.has_forms else ""
         if document.is_xfa:
             forms = ("  ·  XFA form: its fields can't be shown or filled here "
@@ -969,12 +1072,6 @@ class MainWindow(FilesMixin, JobsMixin, AccessMixin, SigningMixin, QMainWindow):
         if document.form_error():
             forms = f"  ·  its form fields couldn't be loaded ({document.form_error()})"
         self.status_left.setText(f"{document.path}{forms}")
-        self._set_document_actions_enabled(True)
-        self._check_signatures(document)
-        if not any(document.has_text(i) for i in range(min(3, document.page_count))):
-            self.statusBar().showMessage(
-                "This PDF looks scanned (its pages are pictures, with no text). "
-                "Tools > Recognize Text (OCR) makes it searchable.", 15000)
 
     def _refresh_page_count(self) -> None:
         doc = self.view.document
@@ -1063,15 +1160,22 @@ class MainWindow(FilesMixin, JobsMixin, AccessMixin, SigningMixin, QMainWindow):
         event.ignore()
 
     def dropEvent(self, event) -> None:
-        for url in event.mimeData().urls():
-            if url.isLocalFile() and url.toLocalFile().lower().endswith(".pdf"):
-                self.open_path(url.toLocalFile())
-                event.acceptProposedAction()
-                return
+        pdfs = [url.toLocalFile() for url in event.mimeData().urls()
+                if url.isLocalFile() and url.toLocalFile().lower().endswith(".pdf")]
+        if pdfs:
+            event.acceptProposedAction()
+            for path in pdfs:  # each in its own tab
+                self.open_path(path)
 
     def closeEvent(self, event) -> None:
-        if not self._confirm_discard():
-            event.ignore()
-            return
-        self.view.set_document(None)
+        # Every tab with unsaved changes asks, shown as it asks; Cancel on
+        # any keeps the window open with that tab in front.
+        for tab in self.tab_list():
+            if tab.dirty or tab.view.is_editing():
+                self.tabs.setCurrentWidget(tab)
+                if not self._confirm_discard():
+                    event.ignore()
+                    return
+        for tab in self.tab_list():
+            tab.view.set_document(None)
         super().closeEvent(event)

@@ -184,18 +184,7 @@ class SigningMixin:
             self.signature_bar.hide()
 
     def _show_signature_bar(self, level: str, text: str) -> None:
-        background, border = {pdfsign.OK: ("#e6f4ea", "#9fd3ae"),
-                              pdfsign.UNTRUSTED: ("#fff4ce", "#e0c870"),
-                              pdfsign.CHANGED: ("#ffe7cc", "#e8b070"),
-                              pdfsign.BROKEN: ("#fde7e9", "#e8a0a8")}[level]
-        # Explicit colours for the button too (dark mode; see the restriction bar).
-        self.signature_bar.setStyleSheet(
-            f"#signatures {{ background: {background}; border-bottom: 1px solid {border}; }}"
-            "QLabel { color: #202020; }"
-            "QPushButton { color: #1e1e1e; background: #ffffff; border: 1px solid #a0a0a8;"
-            " border-radius: 3px; padding: 3px 14px; }")
-        self.signature_text.setText(text)
-        self.signature_bar.show()
+        self.current.show_signature_bar(level, text)
 
     def show_signatures(self) -> None:
         if not self._signature_infos:

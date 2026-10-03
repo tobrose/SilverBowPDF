@@ -30,11 +30,21 @@ class FilesMixin:
             self.open_path(path)
 
     def open_path(self, path: str | Path) -> None:
-        if not self._confirm_discard():
-            return
-        document = self._with_password(Path(path), lambda pw: PdfDocument(path, password=pw))
+        """Open in a new tab -- or the current one, if it's empty. A file
+        that's already open just gets its tab brought to the front."""
+        path = Path(path)
+        for tab in self.tab_list():
+            if tab.document is not None and self._same_file(path, tab.document.path):
+                self.tabs.setCurrentWidget(tab)
+                return
+        before = self.current
+        new_tab = self._add_tab() if before.document is not None else None
+        document = self._with_password(path, lambda pw: PdfDocument(path, password=pw))
         if document is not None:
             self.view.set_document(document)
+        elif new_tab is not None:  # cancelled, or not a PDF: back where we were
+            self._remove_tab(new_tab)
+            self.tabs.setCurrentWidget(before)
 
     def _with_password(self, path: Path, opener):
         """Call opener(password), prompting until it works or the user gives up.
@@ -57,9 +67,16 @@ class FilesMixin:
                 QMessageBox.critical(self, "Could not open file", str(exc))
                 return None
 
-    def close_document(self) -> None:
-        if self._confirm_discard():
+    def close_document(self) -> bool:
+        """Close the current tab (File > Close, Ctrl+W, a tab's X), asking
+        to save first. The last tab stays, empty."""
+        if not self._confirm_discard():
+            return False
+        if self.tabs.count() > 1:
+            self._remove_tab(self.current)
+        else:
             self.view.set_document(None)
+        return True
 
     def _confirm_discard(self) -> bool:
         """True if it's OK to drop the current document's unsaved edits."""

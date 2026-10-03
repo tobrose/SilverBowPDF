@@ -196,6 +196,29 @@ def run(log_path: Optional[str] = None) -> int:
         return (f"signed twice (file ID, Windows CNG), both valid; {len(roots)} trusted "
                 f"roots; {len(wincert.list_ids())} signing certificate(s) for this user")
 
+    def single_instance() -> str:
+        # A second launch hands its files over a local pipe (instance.py):
+        # QtNetwork must have bundled, and Windows must say who listens.
+        import uuid
+        from PySide6.QtNetwork import QLocalSocket
+        from . import instance
+        name = f"SilverbowPDF-selftest-{uuid.uuid4().hex}"
+        server = instance.InstanceServer(name)
+        try:
+            if not server.listening:
+                raise RuntimeError("couldn't listen on a local pipe")
+            socket = QLocalSocket()
+            socket.connectToServer(name)
+            if not socket.waitForConnected(3000):
+                raise RuntimeError(f"couldn't connect to its own pipe: {socket.errorString()}")
+            owner = instance._server_is_ours(socket)
+            socket.abort()
+            if owner != os.getpid():
+                raise RuntimeError("couldn't confirm the pipe is this user's")
+        finally:
+            server.close()
+        return f"pipe {instance.server_name()}, owner checked"
+
     def icon() -> str:
         from PySide6.QtGui import QIcon
         from pdfapp import ICON_FILE
@@ -208,6 +231,7 @@ def run(log_path: Optional[str] = None) -> int:
     if not failures:
         step("start Qt", qt)
         step("window icon", icon)
+        step("one copy per session (local pipe)", single_instance)
         step("create test PDFs (pikepdf)", make_pdfs)
         step("render a page (pdfium -> QImage)", render)
         step("print (to a PDF file)", printing)

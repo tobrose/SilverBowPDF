@@ -621,13 +621,24 @@ class PdfDocument:
         # Evict the least recently used. Safe because no caller keeps a page
         # (or its text page) across a call that loads a different one.
         while len(self._loaded) > PAGE_CACHE_LIMIT:
-            (file, number), _ = self._loaded.popitem(last=False)
-            old = self._sources[file]
-            text = old.text_cache.pop(number, None)
-            if text is not None:
-                text.textpage.close()
-            old.page_cache.pop(number).close()
+            self._unload_oldest()
         return page
+
+    def _unload_oldest(self) -> None:
+        (file, number), _ = self._loaded.popitem(last=False)
+        source = self._sources[file]
+        text = source.text_cache.pop(number, None)
+        if text is not None:
+            text.textpage.close()
+        source.page_cache.pop(number).close()
+
+    def release_pages(self) -> None:
+        """Close every open pdfium page, with its decoded images and text --
+        for a document out of sight (a background tab). Pages reload on use."""
+        if self._closed:
+            return
+        while self._loaded:
+            self._unload_oldest()
 
     def page_box(self, index: int) -> Tuple[float, float, float, float]:
         """The CropBox in PDF user space, unrotated. Falls back to MediaBox."""

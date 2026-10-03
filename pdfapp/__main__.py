@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QApplication
 
 # Absolute, not relative: PyInstaller runs this file as a top-level script,
 # where ``from .mainwindow`` has no parent package and fails at launch.
-from pdfapp import ICON_FILE, errors
+from pdfapp import ICON_FILE, errors, instance
 from pdfapp.mainwindow import APP_NAME, MainWindow
 
 APP_USER_MODEL_ID = "SilverbowPDF.SilverbowPDF"  # also in packaging/installer.iss
@@ -36,14 +36,21 @@ def main(argv: list[str] | None = None) -> int:
     app.setWindowIcon(QIcon(ICON_FILE))
     errors.install()  # an error in a menu action is shown, not lost
 
-    window = MainWindow()
-    window.show()
-
     # Qt strips its own options (-style etc.) from app.arguments(); what's
     # left after the program name is ours.
     files = app.arguments()[1:]
-    if files:
-        window.open_path(files[0])
+
+    # Already running in this session? It opens the files in tabs; this
+    # copy ends before it costs a window's worth of memory (instance.py).
+    if instance.send_to_running(files):
+        return 0
+    server = instance.InstanceServer()
+
+    window = MainWindow()
+    server.files_requested.connect(window.open_paths)
+    window.show()
+    for path in files:
+        window.open_path(path)
 
     return app.exec()
 
