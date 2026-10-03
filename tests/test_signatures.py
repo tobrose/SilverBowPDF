@@ -489,6 +489,25 @@ def test_picture_signature_tool_in_the_app():
             assert w.history.undo_label() == "Add Signature" and w.view.tool is Tool.SELECT
 
 
+def test_cancelling_after_the_sign_dialog_releases_the_signer():
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp, "c.pdf")
+        _plain_pdf(src)
+        pfx, pw = _id(tmp)
+        closed = []
+        base = _fake_sign_dialog(pfx, pw)
+
+        class Holding(base):  # a signer holding a certificate, like Windows'
+            def exec(self):
+                result = super().exec()
+                self.signer.close = lambda: closed.append(True)
+                return result
+        with _app_window(tmp, src) as w, _patched(SignDialog=Holding):
+            w._ask_save_path = lambda title, suggested: None  # Cancel in Save As
+            w.view.signature_box.emit(0, (300, 100, 520, 170))
+            assert closed == [True] and w.view.document.path == src
+
+
 def _broken_xref_pdf(path):
     """A PDF every viewer opens, with every cross-reference offset wrong --
     a line inserted after the header, as some scanners' software does."""

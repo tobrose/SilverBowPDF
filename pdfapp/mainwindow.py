@@ -1027,6 +1027,17 @@ class MainWindow(QMainWindow):
                             windows_ids, int(self.winId()))
         if dialog.exec() != QDialog.Accepted:
             return
+        try:
+            self._sign_accepted(dialog, doc, index, rect)
+        finally:
+            # The signer holds a Windows certificate (and a smart card's key)
+            # open. pdfsign.sign releases it; any earlier way out -- Cancel
+            # on the save dialog, a failed write -- has to as well.
+            close = getattr(dialog.signer, "close", None)
+            if close is not None:
+                close()
+
+    def _sign_accepted(self, dialog, doc: PdfDocument, index: int, rect) -> None:
         if dialog.picture_path:
             self._picture = dialog.picture
             self.settings.set_signature_picture(dialog.picture_path)
@@ -1505,6 +1516,11 @@ class MainWindow(QMainWindow):
                     f"The author of {path.name} doesn't allow its pages to be copied, "
                     f"so they can't be inserted into another document.")
                 continue
+            if doc.form_error(file):
+                QMessageBox.warning(
+                    self, "Form fields not loaded",
+                    f"The form fields in {path.name} couldn't be loaded, so its pages "
+                    f"are inserted without them showing.\n\n({doc.form_error(file)})")
             refs = doc.source_refs(file)
             pages = pages.inserted(refs, at)
             at += len(refs)
@@ -1766,6 +1782,8 @@ class MainWindow(QMainWindow):
         if document.is_xfa:
             forms = ("  ·  XFA form: its fields can't be shown or filled here "
                      "(same as Chrome/Edge) -- open it in Acrobat")
+        if document.form_error():
+            forms = f"  ·  its form fields couldn't be loaded ({document.form_error()})"
         self.status_left.setText(f"{document.path}{forms}")
         self._set_document_actions_enabled(True)
         self._check_signatures(document)

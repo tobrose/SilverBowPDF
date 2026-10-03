@@ -65,6 +65,7 @@ class _Source:
     page_count: int
     has_forms: bool
     form_type: int = 0
+    form_error: str = ""  # why its form fields couldn't be loaded, if they couldn't
     page_cache: dict = field(default_factory=dict)  # source index -> PdfPage (see _page)
     text_cache: dict = field(default_factory=dict)  # source index -> _PageText, on a cached page
 
@@ -87,6 +88,7 @@ def _open_source(path: Path, password: Optional[str]) -> _Source:
 
     # Form fields only render if the form environment is initialised.
     form_type = 0
+    form_error = ""
     try:
         form_type = pdf.get_formtype()
         has_forms = form_type != 0
@@ -97,9 +99,13 @@ def _open_source(path: Path, password: Optional[str]) -> _Source:
             # an empty form looks like a blank page.
             pdfium_c.FPDF_SetFormFieldHighlightColor(pdf.formenv, 0, FIELD_HIGHLIGHT)
             pdfium_c.FPDF_SetFormFieldHighlightAlpha(pdf.formenv, FIELD_HIGHLIGHT_ALPHA)
-    except Exception:
+    except Exception as exc:
+        # The pages still show, without their fields; form_error says why
+        # (rule 7: isolate and display, don't hide).
         has_forms = False
-    return _Source(SourceInfo(path, password), pdf, count, has_forms, form_type)
+        form_error = f"{type(exc).__name__}: {exc}"
+    return _Source(SourceInfo(path, password), pdf, count, has_forms, form_type,
+                   form_error=form_error)
 
 
 class PdfDocument:
@@ -575,6 +581,11 @@ class PdfDocument:
         only shows the fallback page content, which often has no fields."""
         return self._sources[0].form_type in (pdfium_c.FORMTYPE_XFA_FULL,
                                                 pdfium_c.FORMTYPE_XFA_FOREGROUND)
+
+    def form_error(self, file: int = 0) -> str:
+        """Why a source's form fields couldn't be loaded ('' if they could):
+        its pages then show without fields, which the user must be told."""
+        return self._sources[file].form_error
 
     def page_has_forms(self, index: int) -> bool:
         return self._source(index).has_forms

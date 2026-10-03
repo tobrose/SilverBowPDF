@@ -27,7 +27,9 @@ if (-not (Test-Path $venvPython)) {
 
 Step "Installing dependencies"
 & $venvPython -m pip install --upgrade pip --quiet
-& $venvPython -m pip install -e ".[dev,build]" --quiet
+# Exactly the tested versions (constraints.txt), not whatever is newest today.
+& $venvPython -m pip install -e ".[dev,build]" -c packaging\constraints.txt --quiet
+if ($LASTEXITCODE -ne 0) { throw "Installing the pinned dependencies failed." }
 
 # --- test gate -------------------------------------------------------------
 # The coordinate math is validated against pdfium here. Shipping past a failure

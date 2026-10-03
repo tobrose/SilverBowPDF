@@ -95,6 +95,34 @@ environment before committing, not on your desk.
 the thing is still moving. Don't scale this past a handful of people — there's
 no update mechanism and you'll end up supporting four versions at once.
 
+## Default PDF app
+
+The installer never makes SilverbowPDF the default for `.pdf`: Windows 10/11
+ignore an installer doing that (the user's choice is hash-protected). It
+registers the app as a PDF handler instead, so it appears under *Open with*
+and in *Settings > Apps > Default apps*, and uninstalling removes only its own
+entries.
+
+To make it the default for everyone, use Windows' default-associations file:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<DefaultAssociations>
+  <Association Identifier=".pdf" ProgId="SilverbowPDF.Document" ApplicationName="SilverbowPDF" />
+</DefaultAssociations>
+```
+
+- **GPO:** Computer Configuration > Administrative Templates > Windows
+  Components > File Explorer > *Set a default associations configuration
+  file*, pointing at that XML on a share. Applied at each logon.
+- **In an image:** `Dism /Online /Import-DefaultAppAssociations:C:\path\assoc.xml`
+  applies to profiles created afterwards; users whose profiles roam or
+  persist keep their own choice -- use the GPO for them.
+
+Upgrades start from a clean bundle: the installer deletes the previous
+version's `_internal` folder first (`[InstallDelete]`), so files a newer build
+dropped don't linger.
+
 ## Administrator policy
 
 Settings users choose live in `HKCU\Software\SilverbowPDF`; policy set by IT

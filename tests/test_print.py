@@ -335,8 +335,10 @@ def test_errors_in_actions_are_shown_not_lost():
     import PySide6.QtWidgets as widgets
     saved, widgets.QMessageBox = widgets.QMessageBox, Box
     saved_log = errors.LOG
+    assert "AppData" in str(saved_log) and "Temp" not in str(saved_log), \
+        "roaming AppData survives logoff on a non-persistent desktop; %TEMP% doesn't"
     with tempfile.TemporaryDirectory() as tmp:
-        errors.LOG = Path(tmp, "errors.log")
+        errors.LOG = Path(tmp, "SilverbowPDF", "errors.log")  # folder made on first use
         try:
             try:
                 "".title()()  # the very shape of 0.6.0's print bug
@@ -344,6 +346,15 @@ def test_errors_in_actions_are_shown_not_lost():
                 errors.report(*sys.exc_info())
             assert shown and "TypeError" in shown[0] and str(errors.LOG) in shown[0]
             assert "Traceback" in errors.LOG.read_text(encoding="utf-8")
+            # It roams with the profile, so it stays small: the oldest goes.
+            errors.LOG.write_text("--- old\nTraceback x\n" * 40000, encoding="utf-8")
+            try:
+                raise ValueError("newest")
+            except ValueError:
+                errors.report(*sys.exc_info())
+            text = errors.LOG.read_text(encoding="utf-8")
+            assert len(text.encode()) < errors.LOG_LIMIT and "ValueError: newest" in text
+            assert text.startswith("(older entries dropped)\n--- old\n")
         finally:
             widgets.QMessageBox = saved
             errors.LOG = saved_log

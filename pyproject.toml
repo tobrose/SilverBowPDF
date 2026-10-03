@@ -9,10 +9,14 @@ description = "Desktop PDF viewer and editor"
 license = "GPL-3.0-or-later"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
+# The major versions the code was verified against (page-copy semantics,
+# encryption copying, pdfium's colour order...); a new major is a deliberate
+# upgrade, not a side effect of reinstalling. Builds pin exact versions:
+# packaging/constraints.txt.
 dependencies = [
-    "PySide6>=6.6",
-    "pypdfium2>=4.30",
-    "pikepdf>=8.0",
+    "PySide6>=6.11,<7",
+    "pypdfium2>=5.0,<6",
+    "pikepdf>=10.0,<11",
     # Certificate signatures (user approved 2026-10-02): PAdES signing as an
     # incremental update, and checking signatures. Brings cryptography.
     "pyhanko>=0.37",

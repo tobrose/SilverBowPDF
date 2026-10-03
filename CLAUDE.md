@@ -97,13 +97,20 @@ pdfapp/
                  Emits requests only; MainWindow makes the PageList edit.
   mainwindow.py  Menus, toolbar, status bar, drag-and-drop.
   errors.py      sys.excepthook: an exception in any Qt slot is shown in a
-                 message box and appended to %TEMP%\SilverbowPDF-errors.log.
+                 message box and appended to
+                 %APPDATA%\SilverbowPDF\SilverbowPDF-errors.log -- roaming
+                 AppData, which profile management keeps (%TEMP% it
+                 doesn't); trimmed past 256KB since it roams.
                  Without it the console-less app just "does nothing".
 packaging/       PyInstaller spec, Inno Setup script, build script. icon.ico is made
                  from icon-source.png by scripts/make_icon.py (also writes
                  pdfapp/icon.png, the runtime window icon); both committed.
                  The AppUserModelID is set in __main__.py AND on the installer's
                  shortcuts -- change one, change both, or pinning splits.
+                 The installer registers a PDF handler (ProgID, OpenWithProgids,
+                 Capabilities) but never sets .pdf's default: Windows ignores
+                 that, and IT sets it by GPO (docs/PACKAGING.md). Upgrades
+                 delete the old _internal first.
 ```
 
 Dependency direction is one-way: `transform` <- `pagelist` <- `document` <-
@@ -208,7 +215,11 @@ passing, and give a new feature its own test that goes through its action.
 - No new runtime dependencies without asking. The dependency list is short on
   purpose: PySide6, pypdfium2, pikepdf. Each one is ~50-200MB in the installer.
   Plus the winrt-* packages (Windows OCR bridge, ~3MB; user chose Windows'
-  built-in OCR 2026-09-29 -- the engine itself ships with Windows 11).
+  built-in OCR 2026-09-29 -- the engine itself ships with Windows 11), and
+  pyHanko for signatures (2026-10-02).
+- Builds use exact versions: packaging/constraints.txt (build.ps1 installs
+  with -c). Upgrading a library is a deliberate commit to that file,
+  gated by the tests and the frozen self-test, then a check on the deployment target.
 - Rendering is read-only via pdfium. Document mutation goes through pikepdf.
   Don't mix the two on one code path.
 
@@ -392,8 +403,12 @@ Deployment target is shared multi-session desktops: no GPU, non-persistent
 profiles, pixels re-encoded over a remote-display protocol. Keep memory and repaints lean
 (tests/test_memory.py holds the limits: pages, page images, and no
 off-screen renders -- Qt's deferred show of new page widgets once made
-every open render the whole document); don't
-count on per-user settings surviving logoff.
+every open render the whole document). Profiles are kept by profile
+management (user, 2026-10-02): HKCU (settings), roaming AppData (error
+log) and Documents (digital IDs) carry over; %TEMP% and local AppData
+don't. Anything per user that must survive goes in one of the former.
+Per-user values can still be absent (first logon, profile reset): never
+depend on one being there.
 
 ## Known limits (don't "fix" these without discussion)
 

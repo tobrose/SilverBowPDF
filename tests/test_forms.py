@@ -12,6 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(__file__))
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")  # one test opens the main window
 
 import pikepdf  # noqa: E402
 from pikepdf import Array, Dictionary, Name, String  # noqa: E402
@@ -338,6 +339,42 @@ def test_new_field_on_a_merged_page():
             assert _differing_pixels(_shown(saved, 1, scale=1.0), preview) == 0
             assert {w.name: w.value for w in saved.page_widgets(1)} == {"Full name": "On the inserted page"}
             assert "name" in {w.name for w in saved.page_widgets(0)}, "original form intact"
+
+
+def test_form_that_fails_to_load_is_reported_not_hidden():
+    # Rule 7: if pdfium's form engine can't start, the pages still show --
+    # without their fields -- and the user is told, instead of a "blank" form.
+    import pypdfium2
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QApplication
+    from pdfapp.mainwindow import MainWindow
+    from pdfapp.settings import Settings
+    app = QApplication.instance() or QApplication([])
+
+    def broken(self, *args, **kwargs):
+        raise pypdfium2.PdfiumError("form environment failed")
+    original = pypdfium2.PdfDocument.init_forms
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp, "form.pdf")
+        _make_form(path)
+        pypdfium2.PdfDocument.init_forms = broken
+        try:
+            with PdfDocument(path) as doc:
+                assert "form environment failed" in doc.form_error()
+                assert not doc.has_forms and doc.page_count == 2
+            ini = lambda name: QSettings(str(Path(tmp, name)), QSettings.IniFormat)  # noqa: E731
+            w = MainWindow(Settings(ini("user.ini"), ini("policy.ini")))
+            try:
+                w.open_path(path)
+                app.processEvents()
+                assert "form fields couldn't be loaded" in w.status_left.text()
+            finally:
+                w.view.set_document(None)
+                w.close()
+        finally:
+            pypdfium2.PdfDocument.init_forms = original
+        with PdfDocument(path) as doc:
+            assert doc.form_error() == "" and doc.has_forms
 
 
 if __name__ == "__main__":

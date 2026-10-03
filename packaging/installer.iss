@@ -62,16 +62,20 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a desktop shortcut"; \
     GroupDescription: "Shortcuts:"
 
-; Taking over the .pdf association is NOT a default. On a managed fleet this
-; silently changes what opens when 70 people double-click an invoice, and the
-; first thing they notice is that their PDF reader "broke". Opt-in only, and
-; deliberately unchecked.
-Name: "associate"; Description: "Make {#AppName} the default app for .pdf files"; \
-    GroupDescription: "File associations:"; Flags: unchecked
+; No "make it the default for .pdf" task. Windows 10/11 ignore an installer
+; setting the default (a hash-protected UserChoice wins), so the old task did
+; nothing for most people while claiming otherwise. The app registers itself
+; as a PDF handler instead (below); the user picks it in Settings > Default
+; apps, or IT sets it by GPO -- docs/PACKAGING.md, "Default PDF app".
 
 ; No task for the single-letter shortcut policy (removed, user's call): the
 ; shortcuts are off by default, which is enough. IT can still lock them
 ; through HKLM\Software\Policies\SilverbowPDF by GPO -- see docs/PACKAGING.md.
+
+[InstallDelete]
+; An upgrade starts from a clean bundle: [Files] only adds and replaces, so
+; DLLs and modules a newer build no longer has would linger beside it.
+Type: filesandordirs; Name: "{app}\_internal"
 
 [Files]
 ; PyInstaller onedir output. Everything under dist\SilverbowPDF\.
@@ -96,19 +100,33 @@ Root: HKA; Subkey: "Software\Classes\Applications\{#AppExeName}\shell\open\comma
     ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}"" ""%1"""; \
     Flags: uninsdeletekey
 
-; Only if the user opted in.
+; A ProgID, offered for .pdf (OpenWithProgids) and listed under Settings >
+; Default apps (Capabilities + RegisteredApplications) -- the documented way
+; to be a choosable handler. Never written: .pdf's own default, so nothing
+; changes until the user or IT picks this app, and uninstalling removes only
+; what's ours (the old task deleted .pdf's default even if another app owned
+; it by then).
 Root: HKA; Subkey: "Software\Classes\SilverbowPDF.Document"; \
-    ValueType: string; ValueName: ""; ValueData: "PDF Document"; \
-    Flags: uninsdeletekey; Tasks: associate
+    ValueType: string; ValueName: ""; ValueData: "PDF Document"; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\SilverbowPDF.Document\DefaultIcon"; \
-    ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExeName},0"; \
-    Flags: uninsdeletekey; Tasks: associate
+    ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExeName},0"
 Root: HKA; Subkey: "Software\Classes\SilverbowPDF.Document\shell\open\command"; \
-    ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}"" ""%1"""; \
-    Flags: uninsdeletekey; Tasks: associate
-Root: HKA; Subkey: "Software\Classes\.pdf"; \
-    ValueType: string; ValueName: ""; ValueData: "SilverbowPDF.Document"; \
-    Flags: uninsdeletevalue; Tasks: associate
+    ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}"" ""%1"""
+Root: HKA; Subkey: "Software\Classes\.pdf\OpenWithProgids"; \
+    ValueType: string; ValueName: "SilverbowPDF.Document"; ValueData: ""; \
+    Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\SilverbowPDF"; Flags: uninsdeletekeyifempty
+Root: HKA; Subkey: "Software\SilverbowPDF\Capabilities"; \
+    ValueType: string; ValueName: "ApplicationName"; ValueData: "{#AppName}"; \
+    Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\SilverbowPDF\Capabilities"; \
+    ValueType: string; ValueName: "ApplicationDescription"; \
+    ValueData: "View, sign and edit PDF documents"
+Root: HKA; Subkey: "Software\SilverbowPDF\Capabilities\FileAssociations"; \
+    ValueType: string; ValueName: ".pdf"; ValueData: "SilverbowPDF.Document"
+Root: HKA; Subkey: "Software\RegisteredApplications"; \
+    ValueType: string; ValueName: "{#AppName}"; \
+    ValueData: "Software\SilverbowPDF\Capabilities"; Flags: uninsdeletevalue
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; \
