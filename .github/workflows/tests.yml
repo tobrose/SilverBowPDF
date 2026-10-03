@@ -1,0 +1,47 @@
+# Runs the whole test suite on every push to main and every pull request, on
+# Windows (the only platform built and shipped), with the exact library
+# versions the installer uses (packaging/constraints.txt).
+#
+# The tests are plain scripts (python tests/test_x.py), each exiting non-zero
+# on a failure; Qt runs offscreen and settings are INI files, never the
+# registry. OCR tests skip, saying so, if the runner's Windows has no OCR
+# language. Building the installer stays local (build.ps1): it needs Inno
+# Setup, and the frozen self-test is meant for the machine it will run on.
+
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: packaging/constraints.txt
+
+      - name: Install (pinned)
+        run: python -m pip install -e ".[dev]" -c packaging/constraints.txt
+
+      - name: Tests
+        shell: pwsh
+        run: |
+          $failed = @()
+          foreach ($test in Get-ChildItem tests\test_*.py) {
+            Write-Host "::group::$($test.Name)"
+            python $test.FullName
+            $code = $LASTEXITCODE
+            Write-Host "::endgroup::"
+            if ($code -ne 0) { $failed += $test.Name; Write-Host "::error::$($test.Name) failed" }
+          }
+          if ($failed) { throw "Failed: $($failed -join ', ')" }

@@ -19,6 +19,9 @@ python tests/test_pages.py
 pytest                            # tests, if pytest is installed
 ```
 
+Every push to main runs all tests on GitHub (windows-latest, pinned
+versions): .github/workflows/tests.yml. A red run means don't ship.
+
 ## Architecture
 
 ```
