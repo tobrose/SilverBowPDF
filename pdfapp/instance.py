@@ -2,7 +2,7 @@
 over and exits.
 
 Opening a PDF from Explorer or an email starts SilverbowPDF.exe again. On a
-shared multi-session host every extra copy is another ~100-150MB of the host's RAM,
+shared multi-session host every extra copy is another ~100-150MB of its RAM,
 so (user's call) the running copy opens the file in a new tab instead.
 
 The handover is a local socket (a named pipe on Windows) whose name holds

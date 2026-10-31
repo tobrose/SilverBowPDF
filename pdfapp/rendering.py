@@ -68,9 +68,10 @@ def bitmap_to_qimage(bitmap) -> QImage:
 
 # What the page view keeps rendered. A count alone doesn't bound memory: a
 # page is ~2MB at 100% but ~120MB at 800% (measured 1.4GB for 12 at 800%,
-# per user on a shared multi-session host). Over budget, images at other zoom levels
-# go first, then the least recently used -- but never the newest two, which
-# may both be on screen (a page break), or every repaint would re-render.
+# per user on a shared multi-session host). Over budget, images at other
+# zoom levels go first, then the least recently used -- but never the newest
+# two, which may both be on screen (a page break), or every repaint would
+# re-render.
 CACHE_BYTES = 128 * 1024 * 1024
 CACHE_PAGES = 64
 _ALWAYS_KEEP = 2

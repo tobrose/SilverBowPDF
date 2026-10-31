@@ -32,3 +32,6 @@ Thumbs.db
 scratch/
 samples/
 *.local.pdf
+
+# Personal, machine-specific notes for Claude Code -- never committed
+CLAUDE.local.md

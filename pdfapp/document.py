@@ -28,8 +28,8 @@ FIELD_HIGHLIGHT_ALPHA = 90
 # Loaded pdfium pages kept open, across all sources. A page that has been
 # rendered holds its decoded images until it's closed -- ~8MB a page for a
 # 300 DPI scan, measured -- so keeping every page ever shown open made an
-# 80-page scan cost 800MB once scrolled through. On a shared multi-session host
-# that's per user. Enough for what's on screen plus the sidebar's renders.
+# 80-page scan cost 800MB once scrolled through. On a shared multi-session
+# host that's per user. Enough for what's on screen plus the sidebar's renders.
 PAGE_CACHE_LIMIT = 12
 
 _ANNOT_KINDS = {

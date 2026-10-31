@@ -7,7 +7,8 @@ form fields on screen (PageRenderer.print_image).
 Pages are fitted to the printable area, centred, and turned a quarter
 when that makes them bigger (a landscape page on portrait paper), as
 Acrobat's "Fit" does. Rendering stops at PRINT_DPI: sharp for text and
-scans, and each sheet stays a size a redirected (remote-session) printer can spool.
+scans, and each sheet stays a size a redirected (remote-session) printer can
+spool.
 """
 
 from __future__ import annotations

@@ -42,9 +42,9 @@ class JobsMixin:
         printer = QPrinter(QPrinter.HighResolution)
         printer.setDocName(doc.title)
         if not printer.isValid() or printer.printerName() not in names:
-            # A session with printers but no default one (a remote desktop session can
-            # be like that): start the dialog on a real printer rather than
-            # leave Windows' dialog to cope with none.
+            # A session with printers but no default one (a remote desktop
+            # session can be like that): start the dialog on a real printer
+            # rather than leave Windows' dialog to cope with none.
             printer.setPrinterName(default_printer() or names[0])
         selected = self.sidebar.selected_rows() if self.sidebar_dock.isVisible() else []
         # Our preview first (user's choice): Windows 11's dialog can't preview

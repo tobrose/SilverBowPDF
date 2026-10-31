@@ -7,9 +7,9 @@ in Print went unseen until it reached real users.) This hook says what failed,
 in a message box, and appends the full traceback to a log that can be sent
 to whoever looks after the app.
 
-The log is in roaming AppData, not %TEMP%: on non-persistent desktops, profile management
-carries roaming AppData across logons, while %TEMP% goes at
-logoff -- usually before anyone asks for the log. Roaming means it's copied
+The log is in roaming AppData, not %TEMP%: on non-persistent desktops,
+profile management carries roaming AppData across logons, while %TEMP% goes
+at logoff -- usually before anyone asks for the log. Roaming means it's copied
 at every logon, so it's kept small (LOG_LIMIT; the oldest entries go).
 """
 

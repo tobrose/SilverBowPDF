@@ -128,8 +128,8 @@ pdfapp/
   errors.py      sys.excepthook: an exception in any Qt slot is shown in a
                  message box and appended to
                  %APPDATA%\SilverbowPDF\SilverbowPDF-errors.log -- roaming
-                 AppData, which profile management keeps (%TEMP% it
-                 doesn't); trimmed past 256KB since it roams.
+                 AppData, which profile management keeps across logons
+                 (%TEMP% it doesn't); trimmed past 256KB since it roams.
                  Without it the console-less app just "does nothing".
 packaging/       PyInstaller spec, Inno Setup script, build script. icon.ico is made
                  from icon-source.png by scripts/make_icon.py (also writes
@@ -248,7 +248,8 @@ passing, and give a new feature its own test that goes through its action.
   pyHanko for signatures (2026-10-02).
 - Builds use exact versions: packaging/constraints.txt (build.ps1 installs
   with -c). Upgrading a library is a deliberate commit to that file,
-  gated by the tests and the frozen self-test, then a check on the deployment target.
+  gated by the tests and the frozen self-test, then a check on the
+  deployment target.
 - Rendering is read-only via pdfium. Document mutation goes through pikepdf.
   Don't mix the two on one code path.
 
@@ -264,9 +265,10 @@ discussion. Next: nothing queued -- ask.
 
 ## Deployment target
 
-Shared Windows 11 multi-session desktops: no GPU, non-persistent
-profiles, pixels re-encoded over a remote-display protocol. Keep memory and repaints lean
-(tests/test_memory.py holds the limits: pages, page images, and no
-off-screen renders). profile management keeps HKCU, roaming AppData
-and Documents; %TEMP% and local AppData don't. Per-user values can still be
-absent (first logon, profile reset): never depend on one being there.
+Shared Windows 11 multi-session desktops: no GPU, many users per host,
+pixels re-encoded over a remote-display protocol. Keep memory and repaints
+lean (tests/test_memory.py holds the limits: pages, page images, and no
+off-screen renders). Profile management keeps HKCU, roaming AppData and
+Documents across logons; %TEMP% and local AppData don't. Per-user values
+can still be absent (first logon, profile reset): never depend on one being
+there. Machine-local notes, if any: CLAUDE.local.md (gitignored).

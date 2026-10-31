@@ -13,8 +13,8 @@ NoOp stamp style, which keeps it.
 
 Checking uses Windows' trusted roots (wincert.trust_certificates): a
 certificate the company issued checks out as trusted, as in Outlook.
-Revocation isn't checked (no network fetching): a desktop opening a
-PDF shouldn't stall on an OCSP server.
+Revocation isn't checked (no network fetching): opening a PDF shouldn't
+stall on an OCSP server.
 """
 
 from __future__ import annotations

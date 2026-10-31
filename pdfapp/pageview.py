@@ -394,8 +394,8 @@ class PdfView(FormsMixin, TextBoxMixin, DrawingMixin, QScrollArea):
         self.setFocus(Qt.OtherFocusReason)
 
     # -- search matches (found by findbar.FindBar; drawn here as chrome).
-    # Repaint only the pages whose matches changed: on a remote desktop every repaint
-    # is re-encoded and sent.
+    # Repaint only the pages whose matches changed: on a remote desktop every
+    # repaint is re-encoded and sent.
 
     def set_search_hits(self, index: int, hits) -> None:
         """Matches on one page: [(start, end, rects)], as find_text gives."""

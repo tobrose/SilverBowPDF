@@ -112,10 +112,10 @@ class FloatingBar(QFrame):
     """A small row of buttons floating by the text: the mark bar under a
     selection, the style bar over the typewriter. A child of the scrolling
     page column, not a popup window -- it scrolls with the page, can't grab
-    the next click, and costs a remote desktop one small repaint -- and not of the page
-    itself, which would clip it when zoomed out narrower than the bar. Its
-    buttons never take focus, so keys stay with the view, and a text editor
-    being typed in keeps its caret."""
+    the next click, and costs a remote desktop one small repaint -- and not
+    of the page itself, which would clip it when zoomed out narrower than
+    the bar. Its buttons never take focus, so keys stay with the view, and a
+    text editor being typed in keeps its caret."""
 
     def __init__(self, parent):
         super().__init__(parent)

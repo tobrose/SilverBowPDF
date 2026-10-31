@@ -136,8 +136,9 @@ name the active tool ("Annotate: Rectangle").
 Single-letter tool shortcuts are OFF by default (user's call: their users
 are mouse-only). Tools menu toggle (HKCU); administrator policy
 HKLM\Software\Policies\SilverbowPDF\SingleKeyShortcuts locks it either way
-(settings.py; set by GPO or deployment tooling -- the installer task for it was removed,
-user's call: off by default is sufficient). Ctrl shortcuts always on.
+(settings.py; set by GPO or deployment tooling -- the installer task for
+it was removed, user's call: off by default is sufficient). Ctrl shortcuts
+always on.
 Tests pass INI-backed QSettings -- never touch the real registry.
 
 Encryption (user's choices, 2026-09-30): Save and Save As keep a protected

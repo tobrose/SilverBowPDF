@@ -6,8 +6,8 @@
 # must not quietly pick up a new major version.
 #
 # To upgrade: change versions here, rebuild (the tests and the frozen
-# self-test gate it), test where it's deployed, commit. Regenerate from a working
-# venv with:  python -m pip freeze --exclude-editable
+# self-test gate it), test where it's deployed, commit. Regenerate from a
+# working venv with:  python -m pip freeze --exclude-editable
 
 aiohappyeyeballs==2.7.1
 aiohttp==3.14.3

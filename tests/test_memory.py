@@ -1,9 +1,9 @@
 """Memory stays bounded however much of a document is looked at.
 
-The target is a shared multi-session host with no GPU, where every user's copy of
-the app shares one machine's RAM. Measured before these limits: an 80-page
-300 DPI scan grew to 800MB once scrolled through (every pdfium page kept
-open with its decoded image), and 800% zoom held 1.4GB of page images.
+The target is a shared multi-session host with no GPU, where every user's
+copy of the app shares one machine's RAM. Measured before these limits: an
+80-page 300 DPI scan grew to 800MB once scrolled through (every pdfium page
+kept open with its decoded image), and 800% zoom held 1.4GB of page images.
 Opening any document also rendered every page once, off screen.
 
 UI parts run on the offscreen platform with INI settings -- never the real

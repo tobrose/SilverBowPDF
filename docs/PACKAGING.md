@@ -24,9 +24,10 @@ managed Windows box it looks indistinguishable from malware staging itself:
 AppLocker blocks it, Defender rescans ~200MB per launch. onedir installs once
 and starts immediately.
 
-**Inno Setup, not MSI.** Inno produces an `.exe`, and endpoint-management tools deploy an `.exe`
-with silent switches perfectly well. Go to WiX/MSI only if you need GPO
-software installation policy specifically, which wants a real MSI.
+**Inno Setup, not MSI.** Inno produces an `.exe`, and endpoint-management
+tools deploy an `.exe` with silent switches perfectly well. Go to WiX/MSI
+only if you need GPO software installation policy specifically, which wants
+a real MSI.
 
 **No UPX.** Compressed executables are a heuristic AV trigger. Saving 30MB is
 not worth arguing with Defender.
@@ -56,16 +57,17 @@ button hidden behind **More info**.
 For your own machine, ignore this. For anyone else, understand what you're
 choosing between:
 
-- **Don't sign, whitelist instead.** You own the endpoint tooling. Deploy with your
-  endpoint-management tool silently and users never see a SmartScreen prompt, because they never
-  run the installer — the tool does, as SYSTEM. Add a Defender/ASR exclusion for
-  the install path if needed. Cost: zero. This is almost certainly the right
-  answer for internal distribution.
+- **Don't sign, deploy silently instead.** If you manage the endpoints, push
+  the installer with your endpoint-management tool and users never see a
+  SmartScreen prompt, because they never run the installer — the tool does,
+  as SYSTEM. Add a Defender/ASR exclusion for the install path if needed.
+  Cost: zero. Usually the right answer for internal distribution.
 - **OV certificate,** roughly $200–400/year. Removes the "unknown publisher"
   wording, but SmartScreen reputation still accrues per-certificate over time,
-  so early builds may still warn. Needed if the thing ever leaves the company.
+  so early builds may still warn. Needed if it's distributed outside your
+  organisation.
 - **EV certificate,** more expensive and requires a hardware token. Immediate
-  SmartScreen reputation. Overkill here.
+  SmartScreen reputation.
 
 Signing is not a checkbox you add later for free — every release has to be
 signed, so it becomes part of the build pipeline permanently. Decide before you
@@ -127,14 +129,14 @@ dropped don't linger.
 
 Settings users choose live in `HKCU\Software\SilverbowPDF`; policy set by IT
 lives in `HKLM\Software\Policies\SilverbowPDF` and wins, with the matching
-menu item shown as "set by administrator". On a non-persistent desktop
-policy is the reliable place: HKLM is part of the machine image, while HKCU may not
+menu item shown as "set by administrator". On non-persistent desktops policy
+is the reliable place: HKLM is part of the machine image, while HKCU may not
 survive logoff.
 
 | Value | Type | Meaning |
 |---|---|---|
 | `SingleKeyShortcuts` | DWORD | `0` locks single-letter tool shortcuts (V, H, T, ...) off; `1` locks them on. Absent: off by default, and users may turn them on in the Tools menu. Ctrl shortcuts are never affected. |
 
-Set it by GPO (Registry preference) or any endpoint-management tool. The installer doesn't set
-it: the shortcuts are off by default, which is usually all that's needed.
-
+Set it by GPO (Registry preference) or any endpoint-management tool. The
+installer doesn't set it: the shortcuts are off by default, which is usually
+all that's needed.

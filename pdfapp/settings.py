@@ -3,13 +3,13 @@
 Two places, the usual Windows split:
 
   HKCU\\Software\\SilverbowPDF             the user's own choices (Tools menu)
-  HKLM\\Software\\Policies\\SilverbowPDF   set by IT (GPO, deployment tooling, or the
-                                          installer's task); wins over the user,
+  HKLM\\Software\\Policies\\SilverbowPDF   set by IT (GPO or deployment
+                                          tooling); wins over the user,
                                           and the menu shows it's locked
 
-Policy matters on a non-persistent desktop: a user's HKCU choices may
-not survive logoff unless profile management roams them, but HKLM is in
-the machine image.
+Policy matters on a non-persistent desktop: a user's HKCU choices may not
+survive logoff unless profile management roams them, but HKLM is in the
+machine image.
 
 Settings objects are passed in, so tests use throwaway INI files and never
 touch the real registry.
