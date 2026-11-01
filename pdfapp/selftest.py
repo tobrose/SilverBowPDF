@@ -116,6 +116,14 @@ def run(log_path: Optional[str] = None) -> int:
         default = QPrinterInfo.defaultPrinterName() or "none"
         return f"2 sheets to PDF; {len(names)} printer(s) visible, default: {default}"
 
+    def secure_network() -> str:
+        # Help > Check for Updates talks to GitHub over HTTPS through Qt: its
+        # TLS backend plugin must have bundled. No network needed to know.
+        from PySide6.QtNetwork import QSslSocket
+        if not QSslSocket.supportsSsl():
+            raise RuntimeError(f"Qt has no TLS here (backends: {QSslSocket.availableBackends()})")
+        return f"TLS via {QSslSocket.activeBackend()}"
+
     def recognize() -> str:
         # Windows' OCR through the bundled winrt bridge, on a rendered page.
         # Fails if the bridge didn't bundle -- or if this Windows has no OCR
@@ -232,6 +240,7 @@ def run(log_path: Optional[str] = None) -> int:
         step("start Qt", qt)
         step("window icon", icon)
         step("one copy per session (local pipe)", single_instance)
+        step("secure connections (for Check for Updates)", secure_network)
         step("create test PDFs (pikepdf)", make_pdfs)
         step("render a page (pdfium -> QImage)", render)
         step("print (to a PDF file)", printing)

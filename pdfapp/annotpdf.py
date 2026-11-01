@@ -541,6 +541,11 @@ def apply_edits(pdf: pikepdf.Pdf, page_obj: Dictionary, annots: Sequence[Annot])
                 if "/RD" in d:
                     del d["/RD"]
                 d.AP = Dictionary(N=_shape_appearance(pdf, a.kind, a.rect, color, width, fill))
+            elif a.reshaped and a.kind == "Stamp":
+                # Resized: only the box changes. Viewers map the appearance's
+                # bounding box onto /Rect, so the stamp -- any app's -- scales
+                # with it; redrawing it would lose whatever it showed.
+                d.Rect = Array(list(a.rect))
             elif a.reshaped:
                 _reshape_markup(pdf, d, a)
             if a.offset != (0.0, 0.0) or a.edited or a.reshaped:

@@ -6,7 +6,7 @@ import getpass
 from dataclasses import replace
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -50,6 +50,7 @@ from .pageview import FitMode, PdfView, Tool
 from .settings import Settings
 from .accessflow import AccessMixin
 from .fileflow import FilesMixin
+from .helpflow import HelpMixin
 from .jobs import JobsMixin
 from .signflow import SigningMixin
 
@@ -68,7 +69,7 @@ ZOOM_PRESETS = [
 ]
 
 
-class MainWindow(FilesMixin, JobsMixin, AccessMixin, SigningMixin, QMainWindow):
+class MainWindow(FilesMixin, JobsMixin, AccessMixin, SigningMixin, HelpMixin, QMainWindow):
     def __init__(self, settings: Optional[Settings] = None):
         super().__init__()
         self.setWindowTitle(APP_NAME)
@@ -260,8 +261,10 @@ class MainWindow(FilesMixin, JobsMixin, AccessMixin, SigningMixin, QMainWindow):
                                  triggered=self.print_dialog)
         self.act_protect = QAction("Password &Protection…", self,
                                    triggered=self.password_protection)
-        self.act_close = QAction("&Close", self, shortcut=QKeySequence.Close,
-                                 triggered=self.close_document)
+        self.act_close = QAction("&Close", self, triggered=self.close_document)
+        # All of Windows' Close keys (Ctrl+F4 AND Ctrl+W): a standard key
+        # passed as shortcut= keeps only the first.
+        self.act_close.setShortcuts(QKeySequence.Close)
         self.act_quit = QAction("&Quit", self, shortcut=QKeySequence.Quit,
                                 triggered=self.close)
 
@@ -495,6 +498,12 @@ class MainWindow(FilesMixin, JobsMixin, AccessMixin, SigningMixin, QMainWindow):
         self.act_prev_tab = QAction("Previous Tab", self, triggered=lambda: self.next_tab(-1))
         self.act_prev_tab.setShortcuts([QKeySequence("Ctrl+Shift+Tab"),
                                         QKeySequence("Ctrl+PgUp")])
+        self.act_guide = QAction("SilverbowPDF &Guide", self, shortcut=QKeySequence("F1"),
+                                 triggered=lambda: self.show_guide())
+        self.act_check_updates = QAction("Check for &Updates…", self,
+                                         triggered=lambda: self.check_for_updates())
+        self.act_about = QAction("&About SilverbowPDF", self,
+                                 triggered=lambda: self.show_about())
 
     def _build_toolbar(self) -> None:
         bar = QToolBar("Main", self)
@@ -513,7 +522,7 @@ class MainWindow(FilesMixin, JobsMixin, AccessMixin, SigningMixin, QMainWindow):
         bar.addWidget(QLabel(" Page "))
         self.page_spin = QSpinBox(self)
         self.page_spin.setRange(1, 1)
-        self.page_spin.setFixedWidth(70)
+        self._fit_page_spin()
         self.page_spin.valueChanged.connect(self._on_page_spin)
         bar.addWidget(self.page_spin)
         self.page_total = QLabel(" of 0 ")
@@ -621,6 +630,12 @@ class MainWindow(FilesMixin, JobsMixin, AccessMixin, SigningMixin, QMainWindow):
         go_menu = self.menuBar().addMenu("&Go")
         for act in (self.act_prev, self.act_next, self.act_first, self.act_last, self.act_goto):
             go_menu.addAction(act)
+
+        help_menu = self.menuBar().addMenu("&Help")
+        help_menu.addAction(self.act_guide)
+        help_menu.addSeparator()
+        help_menu.addAction(self.act_check_updates)
+        help_menu.addAction(self.act_about)
 
     def _build_statusbar(self) -> None:
         self.status_left = QLabel("No document")
@@ -1057,6 +1072,7 @@ class MainWindow(FilesMixin, JobsMixin, AccessMixin, SigningMixin, QMainWindow):
             self.setWindowTitle(APP_NAME)
             self.setWindowModified(False)
             self.page_spin.setRange(1, 1)
+            self._fit_page_spin()
             self.page_total.setText(" of 0 ")
             self.status_left.setText("No document")
             self.status_right.setText("")
@@ -1081,7 +1097,14 @@ class MainWindow(FilesMixin, JobsMixin, AccessMixin, SigningMixin, QMainWindow):
         self.page_spin.setRange(1, doc.page_count)
         self.page_spin.setValue(self.view.current_page + 1)
         self.page_spin.blockSignals(False)
+        self._fit_page_spin()
         self.page_total.setText(f" of {doc.page_count} ")
+
+    def _fit_page_spin(self) -> None:
+        # As wide as the largest page number needs, in the current style:
+        # a fixed 70px cut off the second digit with Windows 11's side-by-side
+        # arrows. The style's own size hint measures the range's widest value.
+        self.page_spin.setFixedWidth(self.page_spin.sizeHint().width())
 
     def _on_page_changed(self, index: int) -> None:
         self.sidebar.follow_page(index)
@@ -1166,6 +1189,14 @@ class MainWindow(FilesMixin, JobsMixin, AccessMixin, SigningMixin, QMainWindow):
             event.acceptProposedAction()
             for path in pdfs:  # each in its own tab
                 self.open_path(path)
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        # Windows' text size or style changed while running: the page box
+        # was sized for the old font.
+        if event.type() in (QEvent.FontChange, QEvent.StyleChange,
+                            QEvent.ApplicationFontChange) and hasattr(self, "page_spin"):
+            QTimer.singleShot(0, self._fit_page_spin)
 
     def closeEvent(self, event) -> None:
         # Every tab with unsaved changes asks, shown as it asks; Cancel on

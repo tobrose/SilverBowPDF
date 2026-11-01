@@ -125,6 +125,10 @@ pdfapp/
                  connects; and the newcomer checks the LISTENER is this
                  user in this session before sending (Windows lets anyone
                  listen under a taken pipe name).
+  helpflow.py    Help menu (HelpMixin): the guide window (guide.py: the
+                 guide's HTML, in code -- change it with the feature it
+                 describes), Check for Updates (updates.py: where GitHub's
+                 /releases/latest redirects, via QtNetwork, on request only), About.
   errors.py      sys.excepthook: an exception in any Qt slot is shown in a
                  message box and appended to
                  %APPDATA%\SilverbowPDF\SilverbowPDF-errors.log -- roaming

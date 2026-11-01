@@ -83,6 +83,7 @@ on a headless box.
 | `T` | Typewriter: click and type; the bar above picks colour and size. `Esc` or click away to finish (back to Select) |
 | Double-click a text box | Edit its text in place |
 | Drag a text box's edge or corner | Resize it; the text re-wraps |
+| Drag a stamp's or signature picture's edge or corner | Resize it; it keeps its proportions |
 | `R` / `E` / `L` / `A` / `P` | Rectangle / Ellipse / Line / Arrow / Pen -- drag to draw; `Shift` squares or snaps to 45 degrees |
 | Stamp button | Pick a stamp, click to place it |
 | Click a form field | Type into it (`Tab` for the next field), tick a box, or pick from a list |
@@ -97,6 +98,8 @@ on a headless box.
 | Sign > Sign with a Certificate | Drag a box where the signature goes, pick a digital ID (Windows certificate, `.pfx` file, or create one), save the signed copy |
 | Sign > Signature Picture | Place your signature picture (Fill & Sign); Sign > Choose Picture changes it |
 | Details… on the signature bar | Who signed, when, and whether the document changed since |
+| `F1` | The SilverbowPDF Guide: every function and shortcut |
+| Help > Check for Updates | Is there a newer release? |
 | Pan button, or drag with the middle mouse button | Drag the page to scroll; `Esc` back to Select |
 
 Drag PDFs onto the window to open them, each in its own tab.

@@ -115,6 +115,29 @@ orange and scrolled into view. Page edits rescan quietly (no jump).
 Pan tool (hand, sticky until Esc; no letter -- H is Highlight) and
 middle-drag pans in every tool, gaps between pages included.
 
+Help menu (user's request, 2026-10-31): SilverbowPDF Guide (F1; guide.py,
+HTML in code so it works offline; a non-modal window -- tests/test_help.py
+checks every key combination it names is really bound), Check for Updates
+(updates.py: on request only, never at start; reads where GitHub's
+/releases/latest page redirects -- not the REST API, whose 60 requests an
+hour per address a shared host's users would exhaust together; plain vX.Y.Z
+tags only; Qt networking for the system proxy; every outcome reported; the
+repo was made public 2026-10-31 so it works without signing in), About (version,
+libraries, error-log path). The self-test checks Qt's TLS is bundled.
+
+Stamps resize (user's request, 2026-10-31): Select tool, drag an edge or
+corner of any stamp or signature picture; proportions kept, the opposite
+edge/corner fixed, dragging past it stops at the smallest size
+(viewtext._resized_stamp). Grips shrink with small boxes so the middle half
+always moves (a stamp is ~9px tall at 25%); a zero-size box isn't resizable. Ours are redrawn in the new
+box; other apps' stamps keep their appearance and get the new /Rect
+(viewers map the appearance onto it).
+
+The page-number box sizes itself to the page count (the Windows 11 style's
+side-by-side arrows cut off a second digit at a fixed 70px). File > Close
+answers Ctrl+W as well as Ctrl+F4 (a standard key given as shortcut= kept
+only the first).
+
 Tabs (user's call, 2026-10-02, instead of a copy of the app per PDF):
 every document opens in its own tab -- File > Open, drag-and-drop, the
 command line, and a second launch from Explorer/email, which hands over

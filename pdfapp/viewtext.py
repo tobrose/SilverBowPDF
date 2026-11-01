@@ -35,19 +35,26 @@ class TextBoxMixin:
         for annot in reversed(self.document.page_annots(page.index)):
             upright_text = annot.kind == "FreeText" and self._rotation == 0 \
                 and annot.text_rotation == page_rotation
-            if not upright_text and annot.kind not in RESIZABLE_SHAPES:
+            if not upright_text and annot.kind not in RESIZABLE_SHAPES \
+                    and annot.kind != "Stamp":
                 continue
             left, top, right, bottom = page.widget_transform().pdf_rect_to_widget(annot.rect)
-            if not (left - grip <= x <= right + grip and top - grip <= y <= bottom + grip):
+            if right - left < 1 or bottom - top < 1:
+                continue  # a degenerate box (another app's): move or delete it instead
+            # Grips shrink with the box, so its middle half always moves it:
+            # a stamp at 25% zoom is ~9px tall, and fixed 5px grips at top and
+            # bottom would leave nothing to grab it by.
+            gx, gy = min(grip, (right - left) / 4), min(grip, (bottom - top) / 4)
+            if not (left - gx <= x <= right + gx and top - gy <= y <= bottom + gy):
                 continue
             edges = ""
-            if abs(x - left) <= grip:
+            if abs(x - left) <= gx:
                 edges += "l"
-            elif abs(x - right) <= grip:
+            elif abs(x - right) <= gx:
                 edges += "r"
-            if abs(y - top) <= grip:
+            if abs(y - top) <= gy:
                 edges += "t"
-            elif abs(y - bottom) <= grip:
+            elif abs(y - bottom) <= gy:
                 edges += "b"
             if edges:
                 return annot, edges
@@ -68,6 +75,8 @@ class TextBoxMixin:
         if "b" in edges:
             bottom += dy
         scale = page.widget_transform().scale
+        if annot.kind == "Stamp":
+            return self._resized_stamp(drag, left, top, right, bottom)
         if annot.kind != "FreeText":
             # Shapes: anything but degenerate. Edges may cross; normalise.
             min_side = 4.0
@@ -94,6 +103,47 @@ class TextBoxMixin:
                 top = bottom - needed
             else:
                 bottom = top + needed
+        return left, top, right, bottom
+
+    @staticmethod
+    def _resized_stamp(drag, left: float, top: float, right: float, bottom: float):
+        """A stamp keeps its proportions: its appearance is a picture (a
+        word in a frame, a signature) that viewers stretch to the box, and
+        stretched one way it looks broken. The edge or corner opposite the
+        one dragged stays put; a single edge grows the stamp about the
+        middle of the other axis."""
+        edges = drag["edges"]
+        x0, y0, x1, y1 = drag["start"]
+        w0, h0 = x1 - x0, y1 - y0
+        if w0 <= 0 or h0 <= 0:
+            return x0, y0, x1, y1
+        aspect = w0 / h0
+        # Measured from the edge that stays put, signed: dragged across it,
+        # the stamp stops at its smallest instead of growing the other way.
+        dragged_w = (x1 - left) if "l" in edges else (right - x0)
+        dragged_h = (y1 - top) if "t" in edges else (bottom - y0)
+        if ("l" in edges or "r" in edges) and ("t" in edges or "b" in edges):
+            w = max(dragged_w, dragged_h * aspect)  # a corner: the larger pull wins
+        elif "l" in edges or "r" in edges:
+            w = dragged_w
+        else:
+            w = dragged_h * aspect
+        w = max(w, 12.0, 12.0 * aspect)  # never smaller than a 12px-high sliver
+        h = w / aspect
+        if "l" in edges:
+            left, right = x1 - w, x1
+        elif "r" in edges:
+            left, right = x0, x0 + w
+        else:
+            cx = (x0 + x1) / 2
+            left, right = cx - w / 2, cx + w / 2
+        if "t" in edges:
+            top, bottom = y1 - h, y1
+        elif "b" in edges:
+            top, bottom = y0, y0 + h
+        else:
+            cy = (y0 + y1) / 2
+            top, bottom = cy - h / 2, cy + h / 2
         return left, top, right, bottom
 
     def _new_text(self, page: "PageWidget", pos: QPoint, boxed: bool, width) -> None:

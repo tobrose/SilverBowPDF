@@ -24,6 +24,7 @@ import pikepdf  # noqa: E402
 from pikepdf import Dictionary, Name  # noqa: E402
 from PySide6.QtCore import QEvent, QPoint, QPointF, QSettings, Qt  # noqa: E402
 from PySide6.QtGui import QMouseEvent  # noqa: E402
+from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from pdfapp.document import PdfDocument  # noqa: E402
@@ -379,7 +380,9 @@ def test_every_menu_action_runs():
     stand_ins = dict(QMessageBox=Box, QFileDialog=Files, QInputDialog=Inputs,
                      QPrintDialog=Cancelled, PrintPreview=Cancelled, ProtectionDialog=Cancelled,
                      SignDialog=Cancelled, CreateIDDialog=Cancelled, SignaturesDialog=Cancelled,
-                     choose_picture=lambda *a, **k: None)
+                     AboutDialog=Cancelled, choose_picture=lambda *a, **k: None,
+                     # Check for Updates: a file that isn't there, never GitHub.
+                     RELEASES_URL="file:///C:/no-such-dir/silverbowpdf-release.json")
     try:
         with patched(**stand_ins), _window() as w:
             skip = {w.act_quit, w.act_close}  # end the session; closing is tested elsewhere
@@ -392,6 +395,11 @@ def test_every_menu_action_runs():
                 _app.processEvents()
                 ran += 1
             assert ran > 30, f"only {ran} actions ran"
+            for _ in range(500):  # Check for Updates answers later: still stubbed then
+                if w._update_check is None:
+                    break
+                QTest.qWait(10)
+            assert w._update_check is None, "Check for Updates never finished"
             w.close_document()  # last: Close, with the (cancelling) save prompt
     finally:
         sys.excepthook = saved_hook

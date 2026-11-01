@@ -41,7 +41,6 @@
   a PDF shouldn't stall on an OCSP server), so a revoked certificate still
   shows as valid. No timestamps (TSA) are added when signing, and no
   long-term validation data (LTV).
-- A picture signature moves but doesn't resize (place it again instead).
 - Signature appearances are Helvetica/WinAnsi like typed text: a name or
   reason with characters outside cp1252 is left off the appearance (the
   certificate still carries it). Lines that don't fit are dropped.
