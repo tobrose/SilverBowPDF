@@ -133,6 +133,15 @@ always moves (a stamp is ~9px tall at 25%); a zero-size box isn't resizable. Our
 box; other apps' stamps keep their appearance and get the new /Rect
 (viewers map the appearance onto it).
 
+Ctrl + mouse wheel (0.9.1): 15% per notch of wheel movement (angleDelta
+120), however many events it arrives in -- smooth mice, touchpads and
+remote-desktop clients split a notch into several, and zooming 15% on each
+lurched 3x a notch. Events queued together are summed and applied once
+(PdfView._apply_wheel_zoom). The PDF point under the cursor is put back
+under it after each zoom (set_scale holds the page point, not a scaled
+scroll position, which drifted because margins and page gaps don't scale).
+tests/test_zoom.py.
+
 The page-number box sizes itself to the page count (the Windows 11 style's
 side-by-side arrows cut off a second digit at a fixed 70px). File > Close
 answers Ctrl+W as well as Ctrl+F4 (a standard key given as shortcut= kept

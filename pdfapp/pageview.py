@@ -20,7 +20,7 @@ import getpass
 from dataclasses import replace
 from typing import List, Optional
 
-from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, Signal
+from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPen, QWheelEvent
 from PySide6.QtWidgets import (
     QApplication,
@@ -209,6 +209,12 @@ class PdfView(FormsMixin, TextBoxMixin, DrawingMixin, QScrollArea):
         self._rotation = 0
         self._fit = FitMode.WIDTH
         self._current_page = 0
+        # Ctrl+wheel: the wheel's movement since the last zoom, applied once
+        # the queued events are in (see wheelEvent).
+        self._wheel_zoom = 0
+        self._wheel_anchor = QPoint()
+        self._wheel_timer = QTimer(self, singleShot=True, interval=0)
+        self._wheel_timer.timeout.connect(self._apply_wheel_zoom)
         self._tool = Tool.SELECT
         self._selected = None   # (page key, annot ident) or None
         self._drag = None       # in-progress mouse drag, see page_mouse_press
@@ -988,11 +994,12 @@ class PdfView(FormsMixin, TextBoxMixin, DrawingMixin, QScrollArea):
         hbar, vbar = self.horizontalScrollBar(), self.verticalScrollBar()
         if anchor is None:
             anchor = QPoint(self.viewport().width() // 2, self.viewport().height() // 2)
-        # Content-space point under the anchor, as a ratio we can restore after
-        # the relayout. Margins don't scale, so this is accurate to a few px --
-        # close enough that the page doesn't visibly jump.
-        before_x = hbar.value() + anchor.x()
-        before_y = vbar.value() + anchor.y()
+        # The point of the page under the anchor, in PDF space, put back under
+        # the anchor after the relayout. Scaling the scroll position by the
+        # zoom factor instead drifted -- the margins and gaps between pages
+        # don't scale -- a little more with every step.
+        held = self._page_point_at(anchor)
+        before_x, before_y = hbar.value() + anchor.x(), vbar.value() + anchor.y()
         factor = scale / self._scale if self._scale else 1.0
 
         self._scale = scale
@@ -1003,10 +1010,31 @@ class PdfView(FormsMixin, TextBoxMixin, DrawingMixin, QScrollArea):
             page.apply_view_state(self._scale, self._rotation)
 
         self._container.adjustSize()
-        hbar.setValue(int(round(before_x * factor - anchor.x())))
-        vbar.setValue(int(round(before_y * factor - anchor.y())))
+        self._layout.activate()  # the pages' new positions, now
+        if held is not None:
+            page, (x, y) = held
+            wx, wy = page.widget_transform().pdf_to_widget(x, y)
+            now = page.mapTo(self.viewport(), QPointF(wx, wy))
+            hbar.setValue(int(round(hbar.value() + now.x() - anchor.x())))
+            vbar.setValue(int(round(vbar.value() + now.y() - anchor.y())))
+        else:
+            hbar.setValue(int(round(before_x * factor - anchor.x())))
+            vbar.setValue(int(round(before_y * factor - anchor.y())))
         self.zoom_changed.emit(self._scale)
         self._update_current_page()
+
+    def _page_point_at(self, viewport_pos: QPoint):
+        """(page widget, PDF point) under a viewport position -- or, between
+        pages, of the page nearest it vertically (its point lies just off the
+        page, which keeps it fixed all the same). None with no pages."""
+        if not self._pages:
+            return None
+        pos = self._container.mapFrom(self.viewport(), viewport_pos)
+        nearest = min(self._pages,
+                      key=lambda p: 0 if p.y() <= pos.y() <= p.y() + p.height()
+                      else min(abs(pos.y() - p.y()), abs(pos.y() - p.y() - p.height())))
+        local = nearest.mapFrom(self._container, pos)
+        return nearest, nearest.pdf_point_at(local)
 
     def zoom_in(self) -> None:
         for step in ZOOM_STEPS:
@@ -1057,14 +1085,24 @@ class PdfView(FormsMixin, TextBoxMixin, DrawingMixin, QScrollArea):
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         if event.modifiers() & Qt.ControlModifier:
+            # 15% per notch of the wheel (120), however it arrives. Many mice,
+            # touchpads and remote-desktop clients send a notch as several
+            # small events; zooming 15% on each made one notch 3x, and past
+            # ~200% the slow renders let them pile up. They're summed and
+            # applied together, after whatever is already queued.
             delta = event.angleDelta().y()
             if delta:
-                anchor = event.position().toPoint()
-                factor = 1.15 if delta > 0 else 1 / 1.15
-                self.set_scale(self._scale * factor, FitMode.FIXED, anchor)
+                self._wheel_zoom += delta
+                self._wheel_anchor = event.position().toPoint()
+                self._wheel_timer.start()
             event.accept()
             return
         super().wheelEvent(event)
+
+    def _apply_wheel_zoom(self) -> None:
+        delta, self._wheel_zoom = self._wheel_zoom, 0
+        if delta and self.document is not None:
+            self.set_scale(self._scale * 1.15 ** (delta / 120), FitMode.FIXED, self._wheel_anchor)
 
     # ---- navigation ----------------------------------------------------
 
